@@ -4,6 +4,27 @@ All notable changes to gents are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — v0.2.0
+
+### Added
+
+- **Embedded struct flattening.** An untagged embedded field (`type Foo
+  struct { Base }`) now inlines `Base`'s exported fields onto `Foo`,
+  matching `encoding/json.Marshal`'s wire shape. Chains flatten
+  recursively; `*Base` flattens the same way but marks every contributed
+  field optional. Dominant-field resolution implements
+  `encoding/json`'s rules: least-nested wins, and within the minimum
+  depth a tagged contribution wins over an untagged one. Genuine
+  ambiguities panic with the source position of each surviving
+  contribution — `encoding/json` would silently drop all of them, but
+  silently dropping is the kind of thing gents refuses to do.
+  Cross-package embedding (`gorm.Model`, etc.) still panics: gents
+  doesn't load external packages. Workarounds live in the panic message.
+- **MarshalJSON-inheritance guard for embedding.** If any type in the
+  flatten chain declares `MarshalJSON`, gents panics rather than
+  emitting a wire-wrong shape — same safety net as the named-alias
+  case.
+
 ## [Unreleased] — v0.1.1
 
 ### Changed (breaking, pre-release)

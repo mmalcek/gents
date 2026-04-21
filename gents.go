@@ -78,8 +78,10 @@ func generate(paths []string, opts Options) (string, error) {
 		strip:          opts.Strip,
 		directiveMap:   map[string]directiveOriginPos{},
 		namedAliases:   map[string]ast.Expr{},
+		allStructs:     map[string]*ast.StructType{},
 		hasMarshalJSON: map[string]bool{},
 		resolving:      map[string]bool{},
+		visiting:       map[string]bool{},
 	}
 
 	files := make([]*ast.File, 0, len(paths))
@@ -241,7 +243,7 @@ func (e *emitter) collectStructs(file *ast.File) []structInfo {
 			out = append(out, structInfo{
 				origName: orig,
 				tsName:   tsName,
-				fields:   e.collectFields(st),
+				fields:   e.collectFields(st, orig),
 			})
 		}
 	}

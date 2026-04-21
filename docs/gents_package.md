@@ -124,8 +124,16 @@ For **embedded (anonymous) fields**:
   under that key. Equivalent to writing `Name Base `json:"name"`` and
   resolves the same way (the embedded type must be recognized — a
   marked sibling, a primitive, or registered via `-map`).
-- `Base` with no tag → **panic**. Default flattening (inlining the
-  embedded type's fields) is a v0.2 feature.
+- `Base` with no tag → **flattened** (v0.2+). Base's exported fields
+  are promoted onto the outer struct at depth 1, matching
+  `encoding/json.Marshal`'s wire shape. Chains (`Foo` embeds `Bar`
+  embeds `Baz`) flatten recursively. `*Base` flattens the same way
+  but marks every contributed field optional, mirroring the "nil
+  pointer omits the embedded fields" behavior. Dominant-field rules
+  apply on collision: least-nested wins; within the minimum depth,
+  tagged wins over untagged; anything else panics as ambiguous with
+  the source location of each surviving contribution. See §7.1 for
+  what the v0.2 implementation can and cannot resolve.
 - **No `json` tag on an exported field** → field emitted using the Go
   field name verbatim, matching `encoding/json`'s own default.
 - Unexported fields (lowercase Go names) are invisible, same as
@@ -159,14 +167,11 @@ The full mapping, reflecting `encoding/json.Marshal` wire behavior:
 Unsupported types panic with a `file:line` pointer and an actionable
 message:
 
-- Embedded (anonymous) fields with no `json:` tag → **panic with
-  workarounds listed.** Flattening is a v0.2 feature. Two supported
-  patterns exist today:
-  - `Base `json:"-"`` on the embedded field → silently skips it (same
-    semantics as `json:"-"` on any other field).
-  - `Base `json:"name"`` → emits the embedded type as a nested object
-    under the given key (same as if you'd written `Name Base
-    `json:"name"``).
+- Embedded (anonymous) fields with no `json:` tag → **flattened**
+  (v0.2+). Target struct must live in the scanned input; cross-package
+  embedding panics with a pointer at the `-map` / `//gents:map`
+  workaround. Ambiguous field contributions (two equally-qualified
+  entries at the same depth) panic with both locations. See §7.1.
 - `[N]T` fixed-length Go arrays → use a slice.
 - `**T` double pointer → use a single pointer with `omitempty`.
 - Inline anonymous `struct{...}` as a field type.
@@ -764,13 +769,19 @@ other marked structs.
 These panic today. Some may relax in future versions; none are design
 mistakes.
 
-- **Embedded (anonymous) struct fields — default flattening.**
-  `encoding/json` flattens embedded fields into the enclosing struct's
-  JSON, applying "dominant field" rules for name collisions.
-  Supporting this properly requires cross-file/package type resolution,
-  so gents defers it to v0.2. Two tagged forms DO work today:
-  `Base `json:"-"`` silently skips, `Base `json:"name"`` emits as a
-  nested object (see §3.2).
+- **Cross-package embedded flattening.** Default flattening works for
+  embedded types declared inside the scanned input (single file or
+  bundle directory) and walks chains recursively. What remains
+  unsupported is an embedded type declared in *another* Go package
+  (`gorm.Model`, `mongo.ID`, etc.) — gents doesn't load external
+  packages, so it can't enumerate the fields. Workarounds: declare a
+  local mirror with the fields you need, rewrite the field as
+  `Base Base `json:"base"`` to nest instead of flatten, or register
+  the type via `-map` / `//gents:map` for a TS placeholder. Also
+  unsupported at any depth: embedding a type with a custom
+  `MarshalJSON` method (the wire shape comes from the method, not
+  field walking — gents panics with a pointer to the workaround) and
+  generic-instantiation embedding (`Box[T]`).
 - **Fixed-length Go arrays (`[N]T`).** `encoding/json` marshals these as
   JSON arrays, inconsistently with the `[]byte` base64 special case.
   Workaround: use a slice.
@@ -829,11 +840,10 @@ v0.1.0 ships everything in §3. Remaining candidates for future releases:
 - **Mirror-mode output** (one TS file per Go file with `import`
   statements) — only if real projects ask; bundle mode already covers
   the functional case.
-- **Embedded struct flattening (default case, no json tag)** —
-  `Base `json:"-"`` and `Base `json:"name"`` already work; what
-  remains is the default flatten-into-enclosing-struct behavior.
-  Genuinely difficult because of encoding/json's dominant-field rules
-  and the need for cross-file/package resolution.
+- **Cross-package embedded flattening.** Same-bundle flattening shipped
+  in v0.2; resolving `gorm.Model` and friends would require loading
+  external packages (`go/build` or `go/packages`) which pushes past
+  the "tiny tool" ethos. Revisit only if real demand surfaces.
 
 Nothing beyond this is planned until demand surfaces.
 

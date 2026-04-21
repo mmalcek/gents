@@ -44,6 +44,12 @@ var goldenCases = []goldenCase{
 	{"type_map_override_builtin", false, gents.Options{TypeMap: map[string]string{"time.Time": "Date | null"}}},
 	{"embedded_nested", false, gents.Options{}},
 	{"embedded_skipped", false, gents.Options{}},
+	{"embedded_flatten_simple", false, gents.Options{}},
+	{"embedded_flatten_chain", false, gents.Options{}},
+	{"embedded_flatten_pointer", false, gents.Options{}},
+	{"embedded_flatten_dominant_name", false, gents.Options{}},
+	{"embedded_flatten_dominant_tag", false, gents.Options{}},
+	{"embedded_flatten_mixed_with_named_tag", false, gents.Options{}},
 	{"named_alias_resolved", false, gents.Options{}},
 	{"named_alias_chain", false, gents.Options{}},
 	{"gents_map_directive", false, gents.Options{}},
@@ -145,7 +151,6 @@ type panicCase struct {
 
 var panicCases = []panicCase{
 	{"panic_chan", false, "channel", gents.Options{}},
-	{"panic_embedded", false, "flattening is not yet supported", gents.Options{}},
 	{"panic_map_nonstring_key", false, "string-keyed", gents.Options{}},
 	{"panic_array", false, "fixed-length", gents.Options{}},
 	{"panic_double_pointer", false, "double pointer", gents.Options{}},
@@ -168,6 +173,11 @@ var panicCases = []panicCase{
 	{"panic_marker_on_interface", false, "non-struct type", gents.Options{}},
 	{"panic_named_alias_cycle", false, "cycle in type-alias resolution", gents.Options{}},
 	{"panic_named_alias_marshaljson", false, "MarshalJSON", gents.Options{}},
+	{"panic_embedded_flatten_foreign", false, "cross-package flattening is not supported", gents.Options{}},
+	{"panic_embedded_flatten_marshaljson", false, "MarshalJSON method", gents.Options{}},
+	{"panic_embedded_flatten_ambiguous", false, "ambiguous JSON field", gents.Options{}},
+	{"panic_embedded_flatten_not_struct", false, "is not a struct type", gents.Options{}},
+	{"panic_embedded_flatten_cycle", false, "embedded-field cycle", gents.Options{}},
 	{"panic_gents_map_conflict", true, "conflicting //gents:map", gents.Options{}},
 	{"panic_gents_map_malformed", false, "malformed //gents:map", gents.Options{}},
 }

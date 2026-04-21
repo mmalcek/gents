@@ -254,9 +254,12 @@ etc.) are automatically quoted in both the interface and the factory.
 - Only `json:` tags are read. `gorm`, `binding`, `validate`, `xml`,
   `msgpack` — all invisible to gents.
 - Embedded (anonymous) fields: `Base `json:"-"`` skips them, `Base
-  `json:"name"`` emits them as nested objects; untagged embedded
-  fields (which `encoding/json` would flatten) panic with a
-  workarounds hint — default flattening is v0.2.
+  `json:"name"`` emits them as nested objects, and an untagged
+  embed flattens Base's fields into the outer struct (matches
+  `encoding/json`, including the least-nested / tagged-wins
+  dominant-field rules; `*Base` makes contributed fields optional).
+  Cross-package embedding (`gorm.Model`) still panics — declare a
+  local mirror or use `-map` for a TS placeholder.
 - Unsupported types panic with a `file:line` pointer: fixed-length
   arrays (`[N]T`), double pointers (`**T`), inline anonymous structs,
   interfaces with non-empty method sets, `chan`, `func`. Third-party

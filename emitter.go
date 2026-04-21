@@ -19,12 +19,17 @@ type typeInfo struct {
 // fieldInfo describes one emitted field on a struct. jsonName is the raw
 // wire name (the spec refers to it as the JSON name); tsName is the
 // emission-ready form (bare ident or 'quoted' form) used both in the
-// interface property and the factory object-literal key.
+// interface property and the factory object-literal key. depth, pos and
+// tagged are used only during dominant-field resolution for embedded
+// flattening (§3.2) and are ignored by the emission phase.
 type fieldInfo struct {
 	jsonName string
 	tsName   string
 	optional bool
 	ti       typeInfo
+	depth    int       // 0 = directly on the outer struct; 1+ = contributed via embedding
+	pos      token.Pos // source position of the contributing Go field (for diagnostics)
+	tagged   bool      // true when jsonName came from a json:"..." tag with a non-empty name
 }
 
 type structInfo struct {
@@ -41,8 +46,10 @@ type emitter struct {
 	typeMap        map[string]string            // final merged Go-to-TS mappings (directives + CLI overrides)
 	directiveMap   map[string]directiveOriginPos // mappings collected from //gents:map directives across all scanned files
 	namedAliases   map[string]ast.Expr          // in-file non-struct type decls for auto-resolution (e.g. `type UserID string`)
+	allStructs     map[string]*ast.StructType   // every top-level struct declaration in the scanned input, marked or not (powers embedded flattening)
 	hasMarshalJSON map[string]bool              // types that declare a MarshalJSON method in the scanned input
 	resolving      map[string]bool              // active alias-resolution set (cycle detection)
+	visiting       map[string]bool              // active embedded-flatten descent set (cycle detection)
 }
 
 // directiveOriginPos records where a //gents:map directive lived, so
@@ -149,14 +156,20 @@ func parseMapSpec(spec string) (goType, tsType string, ok bool) {
 	return goType, tsType, true
 }
 
-// collectAuxInfo records two things that power in-file type auto-resolution:
+// collectAuxInfo records three things that power in-file auto-resolution
+// and embedded flattening:
 //
 //  1. namedAliases — non-struct top-level type decls (e.g. `type UserID
 //     string`). Stored as the RHS expression so mapIdent can recursively
 //     map it later. Struct types are handled by collectMarked; anything
 //     unmarked and non-struct goes here.
 //
-//  2. hasMarshalJSON — any type in the scanned input that declares a
+//  2. allStructs — every top-level struct declaration, marked or not,
+//     keyed by its Go name. Embedded flattening resolves a target struct
+//     through this map so unmarked Base types can be flattened into
+//     marked outer structs without being exported themselves.
+//
+//  3. hasMarshalJSON — any type in the scanned input that declares a
 //     MarshalJSON method. Safety net: if a named alias also has
 //     MarshalJSON, auto-resolution would miss the custom wire shape, so
 //     we panic with a hint to use -map instead.
@@ -172,7 +185,15 @@ func (e *emitter) collectAuxInfo(file *ast.File) {
 				if !ok {
 					continue
 				}
-				if _, isStruct := ts.Type.(*ast.StructType); isStruct {
+				if stDecl, isStruct := ts.Type.(*ast.StructType); isStruct {
+					// Record every struct declaration (marked or not).
+					// Duplicate names across files are impossible for
+					// marked structs — collectMarked panics on that —
+					// and harmless for unmarked ones since Go itself
+					// forbids duplicate package-level type names.
+					if _, exists := e.allStructs[ts.Name.Name]; !exists {
+						e.allStructs[ts.Name.Name] = stDecl
+					}
 					continue
 				}
 				// Record non-struct top-level types. If this name was
@@ -345,45 +366,68 @@ func (e *emitter) applyStringFlag(base typeInfo, pos token.Pos) typeInfo {
 // ---------------------------------------------------------------------------
 // Field collection
 
-func (e *emitter) collectFields(st *ast.StructType) []fieldInfo {
-	var out []fieldInfo
+// collectFields is the entry point: it walks the struct's fields and
+// returns the resolved, in-order list to emit. For structs with embedded
+// (anonymous) fields this is a two-pass process — collectFieldsDeep
+// produces a flat slice whose entries carry their contributing depth,
+// then resolveDominantFields applies encoding/json's least-nested and
+// tagged-wins rules to eliminate shadowed entries.
+func (e *emitter) collectFields(st *ast.StructType, origName string) []fieldInfo {
+	var raw []fieldInfo
+	e.collectFieldsDeep(st, 0, false, &raw)
+	return e.resolveDominantFields(raw, origName)
+}
+
+// collectFieldsDeep walks st's fields and appends every contributing
+// fieldInfo to out. For embedded fields it handles the three paths from
+// §3.2: json:"-" skips, json:"name" nests the embedded type under that
+// key (single entry at the current depth), and an untagged embed
+// recursively flattens the target struct's fields at depth+1. The
+// pointerEmbedded flag propagates downward: once set it forces every
+// field contributed from the current descent onward to be optional,
+// mirroring encoding/json's "nil pointer omits the embedded fields"
+// behavior.
+func (e *emitter) collectFieldsDeep(st *ast.StructType, depth int, pointerEmbedded bool, out *[]fieldInfo) {
 	if st.Fields == nil {
-		return out
+		return
 	}
 	for _, field := range st.Fields.List {
-		// Parse the json tag up-front — applies the same whether the
-		// field is named or embedded (json:"-" skips either kind;
-		// json:"name" gives an embedded field an explicit nested name).
 		wireName, optional, stringFlag, skip, hasTag := e.parseJSONTag(field)
 		if skip {
 			continue
 		}
+		if pointerEmbedded {
+			optional = true
+		}
 
 		if len(field.Names) == 0 {
-			// Embedded (anonymous) field. Two paths are supported:
-			//  - json:"-"       — already skipped above.
-			//  - json:"name"    — nest the embedded type under that
-			//                     key, matching encoding/json's
-			//                     behavior for tagged embedded fields.
-			// The third path — default flattening when no tag is
-			// present — requires dominant-field resolution across
-			// files/packages and is deferred to v0.2. Check this
-			// before mapGoType so the user sees the flattening hint
-			// instead of a confusing "unsupported named type" panic.
-			if !hasTag || wireName == "" {
-				e.panicAt(field.Pos(),
-					"embedded (anonymous) field flattening is not yet supported. Workarounds: tag it `json:\"name\"` to nest the embedded type under that key, tag it `json:\"-\"` to skip it entirely, or rewrite it as an explicit named field.")
+			// Embedded (anonymous) field. Three paths:
+			//  - json:"-"       — skipped above.
+			//  - json:"name"    — emit as a single nested field under
+			//                     that key at the current depth.
+			//  - no tag / empty — recursively flatten the target
+			//                     struct into the outer struct at
+			//                     depth+1.
+			if hasTag && wireName != "" {
+				ti := e.mapGoType(field.Type)
+				if stringFlag {
+					ti = e.applyStringFlag(ti, field.Pos())
+				}
+				*out = append(*out, fieldInfo{
+					jsonName: wireName,
+					tsName:   formatFieldName(wireName),
+					optional: optional,
+					ti:       ti,
+					depth:    depth,
+					pos:      field.Pos(),
+					tagged:   true,
+				})
+				continue
 			}
-			ti := e.mapGoType(field.Type)
 			if stringFlag {
-				ti = e.applyStringFlag(ti, field.Pos())
+				e.panicAt(field.Pos(), "json ,string flag is not supported on embedded (flattened) fields")
 			}
-			out = append(out, fieldInfo{
-				jsonName: wireName,
-				tsName:   formatFieldName(wireName),
-				optional: optional,
-				ti:       ti,
-			})
+			e.flattenEmbedded(field.Type, depth, pointerEmbedded, out)
 			continue
 		}
 
@@ -396,18 +440,161 @@ func (e *emitter) collectFields(st *ast.StructType) []fieldInfo {
 				continue
 			}
 			name := wireName
-			if !hasTag || name == "" {
+			tagged := hasTag && wireName != ""
+			if !tagged {
 				name = nameIdent.Name
 			}
-			out = append(out, fieldInfo{
+			*out = append(*out, fieldInfo{
 				jsonName: name,
 				tsName:   formatFieldName(name),
 				optional: optional,
 				ti:       ti,
+				depth:    depth,
+				pos:      nameIdent.Pos(),
+				tagged:   tagged,
 			})
 		}
 	}
+}
+
+// flattenEmbedded resolves an untagged embedded field's target type and
+// recursively appends the target's fields into out at depth+1. Handles
+// both value (`Base`) and pointer (`*Base`) embedding; pointer embedding
+// forces every contributed field to be optional. Panics on the error
+// conditions listed in §3.2 / the v0.2 feature plan: cross-package
+// selector, generic instantiation, non-struct target, target with a
+// MarshalJSON method, and embedding cycles.
+func (e *emitter) flattenEmbedded(expr ast.Expr, depth int, pointerEmbedded bool, out *[]fieldInfo) {
+	target := expr
+	if star, ok := expr.(*ast.StarExpr); ok {
+		pointerEmbedded = true
+		target = star.X
+	}
+	switch t := target.(type) {
+	case *ast.Ident:
+		name := t.Name
+		if e.hasMarshalJSON[name] {
+			e.panicAt(t.Pos(),
+				"embedded field %q declares a MarshalJSON method, which overrides the flattened wire shape. Tag it `json:\"name\"` to nest under that key, or register a TS shape with -map / //gents:map",
+				name)
+		}
+		st, ok := e.allStructs[name]
+		if !ok {
+			if _, isAlias := e.namedAliases[name]; isAlias {
+				e.panicAt(t.Pos(),
+					"embedded field %q is not a struct type; only struct embedding can flatten. Tag it `json:\"name\"` to nest under that key, or embed the underlying struct directly",
+					name)
+			}
+			e.panicAt(t.Pos(),
+				"embedded field %q is not declared in the scanned input; cross-package flattening is not supported. Tag it `json:\"name\"` to nest and register %q via -map / //gents:map, or point -in at the directory containing the declaration",
+				name, name)
+		}
+		if e.visiting[name] {
+			e.panicAt(t.Pos(), "embedded-field cycle involving %q", name)
+		}
+		e.visiting[name] = true
+		defer delete(e.visiting, name)
+		e.collectFieldsDeep(st, depth+1, pointerEmbedded, out)
+	case *ast.SelectorExpr:
+		key := t.Sel.Name
+		if x, ok := t.X.(*ast.Ident); ok {
+			key = x.Name + "." + t.Sel.Name
+		}
+		e.panicAt(t.Pos(),
+			"embedded field %q is declared in another package; cross-package flattening is not supported. Tag it `json:\"name\"` to nest and register %q via -map / //gents:map, or declare a local alias with the fields you need",
+			key, key)
+	case *ast.IndexExpr, *ast.IndexListExpr:
+		e.panicAt(target.Pos(), "embedded field: generic-instantiation embedding (Box[T]) is not supported")
+	default:
+		e.panicAt(target.Pos(), "unsupported embedded field expression %T", target)
+	}
+}
+
+// resolveDominantFields applies encoding/json's dominant-field rules
+// (§3.2) to a flat list produced by collectFieldsDeep. Grouping is by
+// jsonName; within each group we keep entries at the minimum depth, and
+// when tagged and untagged entries co-exist at that depth we keep only
+// the tagged ones (tag-presence disambiguates). Anything left over
+// after both filters is a genuine ambiguity and panics with the source
+// position of each surviving contribution. Emission order follows
+// first-seen jsonName, so flattened Base fields appear at the embedded
+// field's original position in the outer struct.
+func (e *emitter) resolveDominantFields(all []fieldInfo, origName string) []fieldInfo {
+	if len(all) == 0 {
+		return all
+	}
+	byName := map[string][]fieldInfo{}
+	order := make([]string, 0, len(all))
+	for _, f := range all {
+		if _, seen := byName[f.jsonName]; !seen {
+			order = append(order, f.jsonName)
+		}
+		byName[f.jsonName] = append(byName[f.jsonName], f)
+	}
+	out := make([]fieldInfo, 0, len(order))
+	for _, name := range order {
+		group := byName[name]
+		winner, ok := pickDominant(group)
+		if ok {
+			out = append(out, winner)
+			continue
+		}
+		locs := make([]string, 0, len(group))
+		minDepth := group[0].depth
+		for _, f := range group {
+			if f.depth < minDepth {
+				minDepth = f.depth
+			}
+		}
+		var ambiguous []fieldInfo
+		for _, f := range group {
+			if f.depth == minDepth {
+				ambiguous = append(ambiguous, f)
+				locs = append(locs, e.fset.Position(f.pos).String())
+			}
+		}
+		e.panicAt(ambiguous[0].pos,
+			"ambiguous JSON field %q in struct %q: %d contributions at depth %d (%s). Disambiguate with explicit json tags or by moving one field to a different level",
+			name, origName, len(ambiguous), minDepth, strings.Join(locs, ", "))
+	}
 	return out
+}
+
+// pickDominant returns the single winning field for a group sharing one
+// jsonName, or ok=false if the group is ambiguous. Rule order matches
+// encoding/json's: least-nested wins; within the minimum depth, tagged
+// wins over untagged; anything else is ambiguous.
+func pickDominant(group []fieldInfo) (fieldInfo, bool) {
+	if len(group) == 1 {
+		return group[0], true
+	}
+	minDepth := group[0].depth
+	for _, f := range group[1:] {
+		if f.depth < minDepth {
+			minDepth = f.depth
+		}
+	}
+	var atMin []fieldInfo
+	for _, f := range group {
+		if f.depth == minDepth {
+			atMin = append(atMin, f)
+		}
+	}
+	if len(atMin) == 1 {
+		return atMin[0], true
+	}
+	var tagged, untagged []fieldInfo
+	for _, f := range atMin {
+		if f.tagged {
+			tagged = append(tagged, f)
+		} else {
+			untagged = append(untagged, f)
+		}
+	}
+	if len(tagged) == 1 && len(untagged) > 0 {
+		return tagged[0], true
+	}
+	return fieldInfo{}, false
 }
 
 // ---------------------------------------------------------------------------
