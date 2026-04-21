@@ -89,6 +89,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   since `MarshalJSON` overrides the wire shape. Cycles are detected
   and panicked on. Cross-package types still need `-map` — auto-
   resolution is in-scanned-input only.
+- **`//gents:map GoType=TSType` source directive.** Co-locate type
+  mappings with the code that uses them instead of bloating
+  `//go:generate` lines. Directives are global across the bundle:
+  declare once, apply everywhere. Precedence: CLI `-map` > directive
+  > built-in. Conflicting directives across files (same Go type,
+  different TS type) panic with both source locations. Malformed
+  directives also panic with a clear format hint.
 - **Custom type mappings** via repeatable CLI `-map GoType=TSType` and
   `Options.TypeMap` library field. Unblocks third-party types
   (`uuid.UUID`, `decimal.Decimal`), named primitive aliases

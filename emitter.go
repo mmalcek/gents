@@ -38,10 +38,18 @@ type emitter struct {
 	marked         map[string]string    // original Go name -> stripped TS name
 	origin         map[string]token.Pos // original Go name -> position of first definition (for collision diagnostics)
 	strip          string
-	typeMap        map[string]string   // user-supplied Go-to-TS mappings (Options.TypeMap)
-	namedAliases   map[string]ast.Expr // in-file non-struct type decls for auto-resolution (e.g. `type UserID string`)
-	hasMarshalJSON map[string]bool     // types that declare a MarshalJSON method in the scanned input
-	resolving      map[string]bool     // active alias-resolution set (cycle detection)
+	typeMap        map[string]string            // final merged Go-to-TS mappings (directives + CLI overrides)
+	directiveMap   map[string]directiveOriginPos // mappings collected from //gents:map directives across all scanned files
+	namedAliases   map[string]ast.Expr          // in-file non-struct type decls for auto-resolution (e.g. `type UserID string`)
+	hasMarshalJSON map[string]bool              // types that declare a MarshalJSON method in the scanned input
+	resolving      map[string]bool              // active alias-resolution set (cycle detection)
+}
+
+// directiveOriginPos records where a //gents:map directive lived, so
+// conflict errors can point at both sides.
+type directiveOriginPos struct {
+	value string
+	pos   token.Pos
 }
 
 // ---------------------------------------------------------------------------
@@ -92,6 +100,53 @@ func wrapIfUnion(ts string) string {
 		return "(" + ts + ")"
 	}
 	return ts
+}
+
+// collectDirectives scans every comment in the file for `//gents:map
+// GoType=TSType` directives and records them in e.directiveMap. Panics
+// on malformed directives and on conflicting declarations across files.
+// Directive mappings are global: a directive written in file A applies
+// to references from file B in the same bundle — same semantics as the
+// CLI `-map` flag.
+func (e *emitter) collectDirectives(file *ast.File) {
+	const prefix = "//gents:map"
+	for _, cg := range file.Comments {
+		for _, c := range cg.List {
+			if !strings.HasPrefix(c.Text, prefix) {
+				continue
+			}
+			rest := strings.TrimSpace(c.Text[len(prefix):])
+			if rest == "" {
+				e.panicAt(c.Pos(), "//gents:map directive missing its spec (expected `//gents:map GoType=TSType`)")
+			}
+			goType, tsType, ok := parseMapSpec(rest)
+			if !ok {
+				e.panicAt(c.Pos(), "malformed //gents:map directive %q: expected `//gents:map GoType=TSType`", rest)
+			}
+			if existing, dup := e.directiveMap[goType]; dup && existing.value != tsType {
+				e.panicAt(c.Pos(),
+					"conflicting //gents:map for %q: %q here, %q at %s",
+					goType, tsType, existing.value, e.fset.Position(existing.pos))
+			}
+			e.directiveMap[goType] = directiveOriginPos{value: tsType, pos: c.Pos()}
+		}
+	}
+}
+
+// parseMapSpec parses "GoType=TSType" — the shared format used by both
+// the -map CLI flag and the //gents:map directive. Trims whitespace
+// around each side and rejects empty keys / empty values.
+func parseMapSpec(spec string) (goType, tsType string, ok bool) {
+	idx := strings.Index(spec, "=")
+	if idx <= 0 || idx == len(spec)-1 {
+		return "", "", false
+	}
+	goType = strings.TrimSpace(spec[:idx])
+	tsType = strings.TrimSpace(spec[idx+1:])
+	if goType == "" || tsType == "" {
+		return "", "", false
+	}
+	return goType, tsType, true
 }
 
 // collectAuxInfo records two things that power in-file type auto-resolution:
@@ -187,8 +242,14 @@ func inferZero(ts string) (string, error) {
 	case "unknown":
 		return "null", nil
 	}
-	if strings.HasSuffix(ts, " | null") || strings.HasPrefix(ts, "null | ") {
-		return "null", nil
+	// Any union that includes `null` as one of its arms → zero is null.
+	// Tolerates both spaced (`X | null`) and tight (`X|null`) forms.
+	if strings.Contains(ts, "null") {
+		for _, part := range strings.Split(ts, "|") {
+			if strings.TrimSpace(part) == "null" {
+				return "null", nil
+			}
+		}
 	}
 	if strings.HasSuffix(ts, "[]") {
 		return "[]", nil

@@ -387,8 +387,22 @@ type.
 
 For Go types gents doesn't recognize out of the box — third-party types,
 arbitrary qualified selectors, or named aliases that declare
-`MarshalJSON` — the user supplies mappings via `-map GoType=TSType`
-(CLI, repeatable) or `Options.TypeMap map[string]string` (library).
+`MarshalJSON` — the user supplies mappings via one of three equivalent
+mechanisms:
+
+1. **CLI flag**: `-map GoType=TSType` (repeatable).
+2. **Source directive**: `//gents:map GoType=TSType` written anywhere in
+   the scanned input. Global by default — a directive in one file
+   applies to references from every other file in the bundle. Typically
+   placed alongside a `//go:generate` line at the top of the file that
+   knows which types it depends on.
+3. **Library field**: `Options.TypeMap map[string]string`.
+
+Precedence: CLI flag > source directive > built-in defaults. CLI
+overrides silently (explicit runtime choice wins). Two directives that
+disagree about the same Go type in the same bundle → panic with both
+locations.
+
 (In-file named aliases without custom marshaling are handled
 automatically — see §3.9.)
 
@@ -423,6 +437,36 @@ generated interface name (e.g. `-map Something=User` combined with
 `//gents:export type User struct{}`), gents panics at Pass 1 with both
 source locations. Same rule as the strip-induced collision check in
 §3.8.
+
+**Example — co-locating mappings with `//go:generate`:**
+
+```go
+package api
+
+//go:generate go run github.com/mmalcek/gents/cmd/gents@v0.1.0 -out ../client/types.ts
+
+//gents:map uuid.UUID=string
+//gents:map decimal.Decimal=string
+//gents:map time.Time=Date | null
+
+import (
+    "github.com/google/uuid"
+    "github.com/shopspring/decimal"
+    "time"
+)
+
+//gents:export
+type User struct {
+    ID     uuid.UUID       `json:"id"`
+    Amount decimal.Decimal `json:"amount"`
+    Joined time.Time       `json:"joined"`
+}
+```
+
+The three `//gents:map` lines live with the source that references the
+types; the `go:generate` line stays clean. Any other file in the bundle
+that uses `uuid.UUID` etc. benefits from the same mappings without
+repeating them.
 
 ### 3.11 Output format invariants
 

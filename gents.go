@@ -76,7 +76,7 @@ func generate(paths []string, opts Options) (string, error) {
 		marked:         map[string]string{},
 		origin:         map[string]token.Pos{},
 		strip:          opts.Strip,
-		typeMap:        opts.TypeMap,
+		directiveMap:   map[string]directiveOriginPos{},
 		namedAliases:   map[string]ast.Expr{},
 		hasMarshalJSON: map[string]bool{},
 		resolving:      map[string]bool{},
@@ -91,7 +91,21 @@ func generate(paths []string, opts Options) (string, error) {
 		files = append(files, f)
 		e.collectMarked(f)
 		e.collectAuxInfo(f)
+		e.collectDirectives(f)
 	}
+
+	// Merge type mappings: directives form the base; CLI Options.TypeMap
+	// overrides silently (an explicit runtime flag is the caller's final
+	// word). Conflicts between directives themselves already panicked in
+	// collectDirectives.
+	merged := make(map[string]string, len(e.directiveMap)+len(opts.TypeMap))
+	for k, v := range e.directiveMap {
+		merged[k] = v.value
+	}
+	for k, v := range opts.TypeMap {
+		merged[k] = v
+	}
+	e.typeMap = merged
 	e.checkTypeMapCollisions()
 
 	var all []structInfo

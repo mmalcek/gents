@@ -171,7 +171,8 @@ underlying types would be wrong for types with custom `MarshalJSON`
 ## Custom type mappings
 
 For third-party types, qualified selectors, or any Go type gents can't
-figure out, point it at the TS shape you want:
+figure out, declare the TS shape — either via CLI flag or via a
+co-located source directive:
 
 ```
 gents -in api.go -out api.ts \
@@ -179,6 +180,24 @@ gents -in api.go -out api.ts \
   -map decimal.Decimal=string \
   -map "time.Time=Date | null"
 ```
+
+or, equivalently, in the source file itself:
+
+```go
+//go:generate go run github.com/mmalcek/gents/cmd/gents@v0.1.0 -out ../client/types.ts
+
+//gents:map uuid.UUID=string
+//gents:map decimal.Decimal=string
+//gents:map time.Time=Date | null
+
+package api
+```
+
+Source directives are **global across the bundle** — declared in one
+file, applied to references in every file. No duplication. CLI `-map`
+still works and overrides directives silently (explicit runtime choice
+wins). Two directives disagreeing about the same Go type panic with
+both locations.
 
 User mappings override built-ins — if you'd rather have `time.Time` emit
 as `Date | null` instead of an RFC3339 string, the `-map` above does it.

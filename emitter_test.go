@@ -46,6 +46,8 @@ var goldenCases = []goldenCase{
 	{"embedded_skipped", false, gents.Options{}},
 	{"named_alias_resolved", false, gents.Options{}},
 	{"named_alias_chain", false, gents.Options{}},
+	{"gents_map_directive", false, gents.Options{}},
+	{"gents_map_directive_bundle", true, gents.Options{}},
 	{"multi_file_bundle", true, gents.Options{}},
 	{"multi_file_nested", true, gents.Options{}},
 }
@@ -166,6 +168,8 @@ var panicCases = []panicCase{
 	{"panic_marker_on_interface", false, "non-struct type", gents.Options{}},
 	{"panic_named_alias_cycle", false, "cycle in type-alias resolution", gents.Options{}},
 	{"panic_named_alias_marshaljson", false, "MarshalJSON", gents.Options{}},
+	{"panic_gents_map_conflict", true, "conflicting //gents:map", gents.Options{}},
+	{"panic_gents_map_malformed", false, "malformed //gents:map", gents.Options{}},
 }
 
 func TestPanics(t *testing.T) {
