@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+
+# Editor / IDE directories
+.idea/
+.vscode/
+*.swp
+
+# Go build / test artifacts
+*.test
+*.out
+coverage.out
+coverage.html
+
+# The gents binary (if anyone runs `go build` at repo root)
+/gents
+
+# Local scratch
+/tmp/
