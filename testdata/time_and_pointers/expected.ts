@@ -9,7 +9,7 @@ export interface Foo {
 
 export function newFoo(): Foo {
   return {
-    created: '0001-01-01T00:00:00Z',
+    created: '',
     updated: null,
     name: null,
     scores: [],

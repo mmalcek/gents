@@ -14,4 +14,12 @@ jobs:
         with:
           go-version: stable
       - run: go vet ./...
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "gofmt issues in:" >&2
+            echo "$out" >&2
+            exit 1
+          fi
       - run: go test -race ./...

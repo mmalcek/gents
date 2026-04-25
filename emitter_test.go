@@ -162,8 +162,8 @@ var panicCases = []panicCase{
 	{"panic_interface_with_methods", false, "interface types with methods", gents.Options{}},
 	{"panic_unmarked_sibling_ref", false, "unsupported named type", gents.Options{}},
 	{"panic_multi_origname_collision", true, "duplicate", gents.Options{}},
-	// tsname collision only surfaces when stripping maps two different Go names to the same TS name.
-	{"panic_multi_tsname_collision", true, "TS name collision", gents.Options{Strip: "t"}},
+	// factory-name collision surfaces when stripping maps two different Go names to the same factory base.
+	{"panic_multi_tsname_collision", true, "factory name collision", gents.Options{Strip: "t"}},
 	// typemap collision: mapped TS name equals a generated interface name.
 	{"panic_type_map_collision", false, "collides with the generated interface", gents.Options{TypeMap: map[string]string{"Something": "User"}}},
 	// typemap with zero-inference failure: user maps a type we can't produce a zero for.

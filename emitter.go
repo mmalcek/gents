@@ -32,24 +32,31 @@ type fieldInfo struct {
 	tagged   bool      // true when jsonName came from a json:"..." tag with a non-empty name
 }
 
+// structInfo carries everything emit() needs for one marked struct.
+// origName is the Go struct name and is used verbatim as the TS interface
+// name and as the type expression in cross-struct references — gents takes
+// no position on Go naming convention. factoryBase is the Go name with the
+// configured prefix stripped; it's only used to build the "newX" factory
+// function name, where the JS-side convention `newFoo()` reads better
+// without the Go-only `t`-style prefix.
 type structInfo struct {
-	origName string
-	tsName   string
-	fields   []fieldInfo
+	origName    string
+	factoryBase string
+	fields      []fieldInfo
 }
 
 type emitter struct {
 	fset           *token.FileSet
-	marked         map[string]string    // original Go name -> stripped TS name
+	marked         map[string]string    // original Go name -> stripped factory base name
 	origin         map[string]token.Pos // original Go name -> position of first definition (for collision diagnostics)
 	strip          string
-	typeMap        map[string]string            // final merged Go-to-TS mappings (directives + CLI overrides)
+	typeMap        map[string]string             // final merged Go-to-TS mappings (directives + CLI overrides)
 	directiveMap   map[string]directiveOriginPos // mappings collected from //gents:map directives across all scanned files
-	namedAliases   map[string]ast.Expr          // in-file non-struct type decls for auto-resolution (e.g. `type UserID string`)
-	allStructs     map[string]*ast.StructType   // every top-level struct declaration in the scanned input, marked or not (powers embedded flattening)
-	hasMarshalJSON map[string]bool              // types that declare a MarshalJSON method in the scanned input
-	resolving      map[string]bool              // active alias-resolution set (cycle detection)
-	visiting       map[string]bool              // active embedded-flatten descent set (cycle detection)
+	namedAliases   map[string]ast.Expr           // in-file non-struct type decls for auto-resolution (e.g. `type UserID string`)
+	allStructs     map[string]*ast.StructType    // every top-level struct declaration in the scanned input, marked or not (powers embedded flattening)
+	hasMarshalJSON map[string]bool               // types that declare a MarshalJSON method in the scanned input
+	resolving      map[string]bool               // active alias-resolution set (cycle detection)
+	visiting       map[string]bool               // active embedded-flatten descent set (cycle detection)
 }
 
 // directiveOriginPos records where a //gents:map directive lived, so
@@ -248,8 +255,8 @@ func (e *emitter) resolveTypeMap(key string, pos token.Pos) (typeInfo, bool) {
 }
 
 // inferZero produces a TS factory zero-value literal for a TS type
-// expression. Handles the cases listed in §2.3 "Custom type mappings" of
-// the design doc. Returns an error (no panic) for unsupported shapes;
+// expression. Handles the cases listed in §3.10 "Custom type mappings"
+// of the design doc. Returns an error (no panic) for unsupported shapes;
 // callers decide whether to panic.
 func inferZero(ts string) (string, error) {
 	ts = strings.TrimSpace(ts)
@@ -287,7 +294,7 @@ func inferZero(ts string) (string, error) {
 }
 
 // checkTypeMapCollisions panics if any user-mapped TS type name matches
-// the name of a struct gents is about to emit. Same invariant as §2.4's
+// the name of a struct gents is about to emit. Same invariant as §3.8's
 // strip-induced collision check, extended to cover the -map flag.
 func (e *emitter) checkTypeMapCollisions() {
 	for goType, tsType := range e.typeMap {
@@ -644,8 +651,8 @@ func (e *emitter) mapIdent(t *ast.Ident) typeInfo {
 	case "any":
 		return typeInfo{"unknown", "null"}
 	}
-	if tsName, ok := e.marked[t.Name]; ok {
-		return typeInfo{tsName, "new" + tsName + "()"}
+	if factory, ok := e.marked[t.Name]; ok {
+		return typeInfo{t.Name, "new" + factory + "()"}
 	}
 	// Auto-resolve in-file named aliases (e.g. `type UserID string`).
 	// Safe for named primitives without custom MarshalJSON; panics
@@ -677,7 +684,15 @@ func (e *emitter) mapSelector(t *ast.SelectorExpr) typeInfo {
 	}
 	switch key {
 	case "time.Time":
-		return typeInfo{"string", "'0001-01-01T00:00:00Z'"}
+		// `time.Time{}` serialises to `"0001-01-01T00:00:00Z"`, but a
+		// factory zero is consumed by the SPA before any wire round-trip
+		// — it scaffolds an empty form, not a real timestamp. Empty
+		// string is the falsy/"no value yet" sentinel JS code already
+		// uses for unset string fields, and it matches the rest of the
+		// tool's "string TS type → '' zero" rule from §2.3 of the
+		// design doc. Round-tripping a Go `time.Time{}` through the
+		// wire is rare and never desired in a fresh-form context.
+		return typeInfo{"string", "''"}
 	case "time.Duration":
 		return typeInfo{"number", "0"}
 	case "json.RawMessage":
@@ -697,7 +712,7 @@ func (e *emitter) mapStar(t *ast.StarExpr) typeInfo {
 
 func (e *emitter) mapArray(t *ast.ArrayType) typeInfo {
 	if t.Len != nil {
-		e.panicAt(t.Pos(), "fixed-length Go arrays are not supported in v0.1; use a slice instead")
+		e.panicAt(t.Pos(), "fixed-length Go arrays are not supported; use a slice instead")
 	}
 	// encoding/json special-cases []byte (and the alias []uint8) as base64 strings.
 	if ident, ok := t.Elt.(*ast.Ident); ok {
@@ -735,7 +750,7 @@ func (e *emitter) emit(structs []structInfo) string {
 
 func (e *emitter) emitInterface(sb *strings.Builder, s structInfo) {
 	sb.WriteString("export interface ")
-	sb.WriteString(s.tsName)
+	sb.WriteString(s.origName)
 	if len(s.fields) == 0 {
 		sb.WriteString(" {}\n")
 		return
@@ -756,9 +771,9 @@ func (e *emitter) emitInterface(sb *strings.Builder, s structInfo) {
 
 func (e *emitter) emitFactory(sb *strings.Builder, s structInfo) {
 	sb.WriteString("export function new")
-	sb.WriteString(s.tsName)
+	sb.WriteString(s.factoryBase)
 	sb.WriteString("(): ")
-	sb.WriteString(s.tsName)
+	sb.WriteString(s.origName)
 	sb.WriteString(" {\n")
 
 	var required []fieldInfo

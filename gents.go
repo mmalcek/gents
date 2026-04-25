@@ -16,12 +16,18 @@ import (
 	"strings"
 )
 
-// Options tunes emission. The zero value emits verbatim names — gents
-// takes no position on Go naming convention.
+// Options tunes emission. The zero value emits verbatim names with no
+// factory stripping — gents takes no position on Go naming convention,
+// so library callers stay explicit about whether they want a prefix
+// stripped. The CLI default is `-strip=t`, but the library API does not
+// inject defaults of its own.
 type Options struct {
-	// Strip is the prefix removed from Go struct names before emitting them
-	// as TS interface names, factory names, and cross-struct references.
-	// Empty string (the default) means no stripping.
+	// Strip is the prefix removed from Go struct names when building the
+	// factory function name (e.g. Strip="t" turns the marked struct
+	// `tFoo` into the factory `newFoo()`). The TS interface name itself
+	// is always emitted verbatim from the Go struct name — Strip never
+	// touches it. Empty string (the default) means no stripping; the
+	// factory for `tFoo` would be `newtFoo()`.
 	Strip string
 
 	// TypeMap supplies user-defined Go-to-TS type mappings. Keys are Go
@@ -170,11 +176,12 @@ func collectGoFiles(dirPath string) ([]string, error) {
 }
 
 // collectMarked is pass 1: record every marked struct's original Go name
-// and its stripped TS name. Enforces two uniqueness invariants across all
-// files processed so far: (1) no two marked structs may share the same Go
-// name, and (2) no two marked structs may map to the same TS name after
-// stripping. Either collision panics with file:line pointing at the later
-// definition.
+// and its stripped factory base name. Enforces two uniqueness invariants
+// across all files processed so far: (1) no two marked structs may share
+// the same Go name (would collide on the verbatim TS interface name), and
+// (2) no two marked structs may map to the same factory base name after
+// stripping (would collide on the emitted "newX" factory). Either
+// collision panics with file:line pointing at the later definition.
 func (e *emitter) collectMarked(file *ast.File) {
 	for _, decl := range file.Decls {
 		gd, ok := decl.(*ast.GenDecl)
@@ -200,21 +207,21 @@ func (e *emitter) collectMarked(file *ast.File) {
 					ts.Name.Name, kind)
 			}
 			orig := ts.Name.Name
-			tsName := stripPrefix(orig, e.strip)
+			factory := stripPrefix(orig, e.strip)
 
 			if prevPos, exists := e.origin[orig]; exists {
 				e.panicAt(ts.Pos(),
 					"duplicate //gents:export struct %q (previously defined at %s)",
 					orig, e.fset.Position(prevPos))
 			}
-			for otherOrig, otherTS := range e.marked {
-				if otherTS == tsName {
+			for otherOrig, otherFactory := range e.marked {
+				if otherFactory == factory {
 					e.panicAt(ts.Pos(),
-						"TS name collision: %q (from %q) conflicts with %q defined at %s",
-						tsName, orig, otherOrig, e.fset.Position(e.origin[otherOrig]))
+						"factory name collision: %q strips to %q which conflicts with %q defined at %s",
+						orig, factory, otherOrig, e.fset.Position(e.origin[otherOrig]))
 				}
 			}
-			e.marked[orig] = tsName
+			e.marked[orig] = factory
 			e.origin[orig] = ts.Pos()
 		}
 	}
@@ -235,15 +242,15 @@ func (e *emitter) collectStructs(file *ast.File) []structInfo {
 				continue
 			}
 			orig := ts.Name.Name
-			tsName, ok := e.marked[orig]
+			factory, ok := e.marked[orig]
 			if !ok {
 				continue
 			}
 			st := ts.Type.(*ast.StructType)
 			out = append(out, structInfo{
-				origName: orig,
-				tsName:   tsName,
-				fields:   e.collectFields(st, orig),
+				origName:    orig,
+				factoryBase: factory,
+				fields:      e.collectFields(st, orig),
 			})
 		}
 	}

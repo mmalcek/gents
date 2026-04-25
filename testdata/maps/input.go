@@ -3,7 +3,7 @@ package maps
 //gents:export
 type Foo struct {
 	Tags  map[string]string `json:"tags"`
-	Items map[string]Item  `json:"items"`
+	Items map[string]Item   `json:"items"`
 	Flags map[string]*bool  `json:"flags"`
 }
 

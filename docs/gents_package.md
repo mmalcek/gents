@@ -151,7 +151,7 @@ The full mapping, reflecting `encoding/json.Marshal` wire behavior:
 | `string` | `string` | `''` |
 | `bool` | `boolean` | `false` |
 | `int`, `int8..int64`, `uint`, `uint8..uint64`, `float32`, `float64`, `byte`, `rune` | `number` | `0` |
-| `time.Time` | `string` (RFC3339) | `'0001-01-01T00:00:00Z'` |
+| `time.Time` | `string` (RFC3339 on the wire) | `''` |
 | `*time.Time` | `string \| null` | `null` |
 | `time.Duration` | `number` (nanoseconds, int64-backed) | `0` |
 | `json.RawMessage` | `unknown` | `null` |
@@ -161,7 +161,7 @@ The full mapping, reflecting `encoding/json.Marshal` wire behavior:
 | `[]T` (T ≠ byte/uint8) | `T[]` | `[]` |
 | `map[string]V` | `Record<string, V>` (only string-keyed maps supported) | `{}` |
 | `*T` (other) | `T \| null` | `null` |
-| Sibling struct marked with `//gents:export` | stripped interface name (see §3.5) | `new<StrippedName>()` |
+| Sibling struct marked with `//gents:export` | verbatim interface name (Go struct name) | `new<StrippedName>()` (see §3.5) |
 | Any Go type registered via `-map` / `Options.TypeMap` (§3.9) | as mapped | inferred from the TS expression |
 
 Unsupported types panic with a `file:line` pointer and an actionable
@@ -228,25 +228,42 @@ the wire is the standard mitigation).
 
 ### 3.5 Naming convention
 
-Given a Go struct name `S` and a strip prefix `P` (CLI flag `-strip`,
-default `""` meaning no stripping):
+Given a Go struct name `S` and a strip prefix `P`:
 
-- Let `N = StripPrefix(S, P)` (if `P` is non-empty and `S` starts with
-  `P`, drop it; else `N = S`).
-- Interface name = `N`.
-- Factory name = `new` + `N`.
-- Cross-struct references also emit as `N` — the stripped name is the
-  canonical TS name everywhere.
+- **Interface name** = `S` (always emitted verbatim — gents does not
+  modify the type's identity).
+- **Factory base** = `StripPrefix(S, P)` (if `P` is non-empty and `S`
+  starts with `P`, drop it; else `S` unchanged).
+- **Factory name** = `new` + factory base.
+- **Cross-struct references** emit as `S` (the verbatim interface
+  name), with their factory zero-value resolved through the same
+  base-stripping logic as the referenced struct's own factory.
+
+The `-strip` flag (CLI `--strip`, library `Options.Strip`) governs only
+the factory base. Two different naming targets, two different rules:
+the interface name is the wire shape's identity (closest TS analogue
+to a Go type name); the factory name is a JS-side construction helper
+where the convention `newFoo()` reads better without the Go-only
+prefix.
 
 | Go struct | `-strip` | TS interface | TS factory |
 |---|---|---|---|
-| `Foo` | `""` (default) | `Foo` | `newFoo` |
-| `tFoo` | `""` (default) | `tFoo` | `newtFoo` |
-| `tFoo` | `"t"` | `Foo` | `newFoo` |
-| `cFoo` | `"c"` | `Foo` | `newFoo` |
+| `Foo` | `""` | `Foo` | `newFoo` |
+| `Foo` | `"t"` | `Foo` | `newFoo` (no `t` to strip) |
+| `tFoo` | `""` | `tFoo` | `newtFoo` |
+| `tFoo` | `"t"` (CLI default) | `tFoo` | `newFoo` |
+| `cFoo` | `"c"` | `cFoo` | `newFoo` |
 
-Default is **no stripping** because gents takes no position on Go naming
-convention. Projects that use a prefix convention opt in explicitly.
+**Defaults:** the **CLI** defaults `-strip=t` because that's the
+convention shared by most consumers (and matches what factory naming
+should look like in JS regardless of the Go struct's prefix). The
+**library API** zero value is `Options.Strip = ""` (no stripping) —
+library callers stay explicit; the CLI handles the convention default.
+
+Collision rules:
+- Two marked structs sharing a Go name → panic (interface collision).
+- Two marked structs that strip to the same factory base (e.g. `tFoo`
+  and `Foo` with `-strip=t`) → panic (factory name collision).
 
 ### 3.6 Non-identifier JSON names
 
@@ -297,10 +314,12 @@ type Inner struct {
 }
 ```
 
-The emitter resolves the reference at Pass 2 by looking up the target's
-stripped TS name (§3.5), and uses the corresponding `new<StrippedName>()`
-call as the factory zero. Source declaration order doesn't matter — a
-two-pass walk collects marked names first, then emits fields.
+The emitter resolves the reference at Pass 2 by emitting the target's
+verbatim interface name as the field type (§3.5), and pairing it with a
+`new<StrippedName>()` call as the factory zero — the strip prefix is
+applied to the factory call only, never to the type name. Source
+declaration order doesn't matter — a two-pass walk collects marked
+names first, then emits fields.
 
 A reference to an **unmarked** struct panics with `file:line`. Silently
 emitting `any` would hide a missing marker.
@@ -501,9 +520,11 @@ gents [-in <path>] -out <output.ts> [flags]
                   recursively (bundle mode). Defaults to the current
                   directory when omitted.
   -out string     TypeScript file to write (required).
-  -strip string   Prefix to strip from Go struct names. Applied uniformly
-                  to interface names, factory names, and cross-struct
-                  references. Empty = verbatim (default).
+  -strip string   Prefix stripped from Go struct names when building
+                  factory function names (default "t" — turns marked
+                  struct tFoo into factory newFoo). The TS interface
+                  name itself is always emitted verbatim. Pass
+                  -strip="" to keep the prefix on the factory too.
   -force          Overwrite the output file even if it wasn't generated
                   by gents (default: refuse).
   -map KEY=VAL    Custom Go-to-TS type mapping (§3.9). Repeatable.
@@ -553,10 +574,14 @@ bug reports.
 ```go
 package gents
 
-// Options tunes emission. The zero value emits verbatim names.
+// Options tunes emission. The zero value emits verbatim names with no
+// factory stripping — library callers stay explicit. The CLI defaults
+// to -strip=t; the library does not inject defaults of its own.
 type Options struct {
-    // Strip is the prefix removed from Go struct names before
-    // emitting them. Empty = no stripping.
+    // Strip is the prefix removed from Go struct names when building
+    // the factory function name. The TS interface name itself is
+    // always emitted verbatim — Strip never touches it. Empty (the
+    // default) = no stripping.
     Strip string
 
     // TypeMap supplies user-defined Go-to-TS mappings. See §3.9.
@@ -624,7 +649,7 @@ export function newItem(): Item {
     id: '',
     name: '',
     tags: [],
-    created_at: '0001-01-01T00:00:00Z',
+    created_at: '',
   }
 }
 ```
@@ -743,22 +768,28 @@ Pointer wrapping handled automatically by recursion — no need to map
 
 ### 6.5 Naming and stripping
 
-Input struct `tFoo` with default `-strip=""` emits as `tFoo` / `newtFoo`:
+Stripping never modifies the interface name. Input struct `tFoo` always
+emits `export interface tFoo { ... }`. The CLI default `-strip=t`
+strips the prefix from the factory name only, giving `newFoo`:
+
+```ts
+export interface tFoo { ... }
+export function newFoo(): tFoo { ... }
+```
+
+Library calls with the zero-value `Options{}` keep the prefix on both
+(`newtFoo`):
 
 ```ts
 export interface tFoo { ... }
 export function newtFoo(): tFoo { ... }
 ```
 
-With `-strip=t`:
-
-```ts
-export interface Foo { ... }
-export function newFoo(): Foo { ... }
-```
-
-The stripped name is also what appears in cross-struct references from
-other marked structs.
+Cross-struct references emit the verbatim interface name as the type
+expression and pair it with `new<StrippedFactoryName>()` for the
+factory zero — e.g. an `Inner` field referencing a marked struct
+`tBar` (with `-strip=t`) renders as `inner: tBar` in the interface and
+`inner: newBar(),` in the factory.
 
 ---
 
@@ -828,7 +859,8 @@ this section.
 
 ## 8. Roadmap
 
-v0.1.0 ships everything in §3. Remaining candidates for future releases:
+§3 describes everything gents currently supports (v0.1 core + v0.2
+embedded flattening). Remaining candidates for future releases:
 
 - **JSDoc comment emission** from Go doc comments through to TS
   interface/property comments.
@@ -860,7 +892,8 @@ Nothing beyond this is planned until demand surfaces.
 
 Breaking changes to watch for pre-v1:
 
-- Changing the default value of `-strip` (currently `""`).
+- Changing the default value of `-strip` (currently `"t"` for the CLI; the library API zero-value remains `""`).
+- Changing what `-strip` modifies (currently the factory name only — the interface name is always verbatim).
 - Renaming the `//gents:export` marker.
 - Adding a new required CLI flag.
 - Changing the default emission format (e.g. `export type` instead of
