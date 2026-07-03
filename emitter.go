@@ -905,25 +905,36 @@ func emitJSDoc(sb *strings.Builder, indent string, lines []string, src string) {
 		return
 	}
 	if len(all) == 1 {
-		sb.WriteString(indent + "/** " + all[0] + " */\n")
+		sb.WriteString(indent)
+		sb.WriteString("/** ")
+		sb.WriteString(all[0])
+		sb.WriteString(" */\n")
 		return
 	}
-	sb.WriteString(indent + "/**\n")
+	sb.WriteString(indent)
+	sb.WriteString("/**\n")
 	for _, l := range all {
-		sb.WriteString(indent + " *")
+		sb.WriteString(indent)
+		sb.WriteString(" *")
 		if l != "" {
-			sb.WriteString(" " + l)
+			sb.WriteString(" ")
+			sb.WriteString(l)
 		}
 		sb.WriteString("\n")
 	}
-	sb.WriteString(indent + " */\n")
+	sb.WriteString(indent)
+	sb.WriteString(" */\n")
 }
 
 func (e *emitter) emitConstBlock(sb *strings.Builder, b constBlock) {
 	emitJSDoc(sb, "", b.doc, b.src)
 	for _, c := range b.consts {
 		emitJSDoc(sb, "", c.doc, "")
-		sb.WriteString("export const " + c.name + " = " + c.value + "\n")
+		sb.WriteString("export const ")
+		sb.WriteString(c.name)
+		sb.WriteString(" = ")
+		sb.WriteString(c.value)
+		sb.WriteString("\n")
 	}
 }
 
