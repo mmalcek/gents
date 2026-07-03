@@ -6,6 +6,8 @@ import (
 	"go/token"
 	"reflect"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -27,6 +29,7 @@ type fieldInfo struct {
 	tsName   string
 	optional bool
 	ti       typeInfo
+	doc      []string  // cleaned doc-comment lines carried through to a JSDoc block
 	depth    int       // 0 = directly on the outer struct; 1+ = contributed via embedding
 	pos      token.Pos // source position of the contributing Go field (for diagnostics)
 	tagged   bool      // true when jsonName came from a json:"..." tag with a non-empty name
@@ -42,13 +45,32 @@ type fieldInfo struct {
 type structInfo struct {
 	origName    string
 	factoryBase string
+	doc         []string // cleaned doc-comment lines emitted as JSDoc above the interface
+	src         string   // base filename of the declaring Go file, for the (source: ...) line
 	fields      []fieldInfo
+}
+
+// constInfo is one emitted `export const` line. value is the already
+// rendered TS expression.
+type constInfo struct {
+	name  string
+	value string
+	doc   []string
+}
+
+// constBlock groups the consts contributed by one marked `const (...)`
+// declaration. Blocks emit in scan order, before any interface.
+type constBlock struct {
+	doc    []string
+	src    string
+	consts []constInfo
 }
 
 type emitter struct {
 	fset           *token.FileSet
 	marked         map[string]string    // original Go name -> stripped factory base name
 	origin         map[string]token.Pos // original Go name -> position of first definition (for collision diagnostics)
+	constNames     map[string]token.Pos // exported const name -> position (duplicate detection + reference resolution)
 	strip          string
 	typeMap        map[string]string             // final merged Go-to-TS mappings (directives + CLI overrides)
 	directiveMap   map[string]directiveOriginPos // mappings collected from //gents:map directives across all scanned files
@@ -94,7 +116,62 @@ func stripPrefix(name, prefix string) string {
 	return name
 }
 
+// lintMarkers panics on comments that were clearly meant to be gents
+// directives but are silently ignored because of stray whitespace
+// (`// gents:export`, `// gents:map A=B`). Prose that merely mentions a
+// directive doesn't match: the export check requires the trimmed comment
+// to be exactly the marker word, and the map check additionally requires
+// a parseable GoType=TSType spec.
+func (e *emitter) lintMarkers(file *ast.File) {
+	for _, cg := range file.Comments {
+		for _, c := range cg.List {
+			if !strings.HasPrefix(c.Text, "//") {
+				continue
+			}
+			text := strings.TrimPrefix(c.Text, "//")
+			trimmed := strings.TrimSpace(text)
+			if trimmed == "gents:export" && text != "gents:export" {
+				e.panicAt(c.Pos(),
+					"found %q — the marker must be exactly //gents:export with no surrounding whitespace, otherwise it is silently ignored", c.Text)
+			}
+			if strings.HasPrefix(trimmed, "gents:map") && !strings.HasPrefix(text, "gents:map") {
+				rest := strings.TrimSpace(strings.TrimPrefix(trimmed, "gents:map"))
+				if _, _, ok := parseMapSpec(rest); ok {
+					e.panicAt(c.Pos(),
+						"found %q — the directive must start exactly with //gents:map with no leading whitespace, otherwise it is silently ignored", c.Text)
+				}
+			}
+		}
+	}
+}
+
+// docLines converts a comment group into cleaned lines for JSDoc
+// emission. ast.CommentGroup.Text already strips comment markers and
+// directive lines (//gents:export, //gents:map), so only human-written
+// prose survives. Returns nil when nothing survives.
+func docLines(cg *ast.CommentGroup) []string {
+	text := strings.TrimRight(cg.Text(), "\n")
+	if text == "" {
+		return nil
+	}
+	return strings.Split(text, "\n")
+}
+
+// fieldDoc returns a field's doc lines: the comment above the field wins,
+// a trailing same-line comment is the fallback.
+func fieldDoc(field *ast.Field) []string {
+	if doc := docLines(field.Doc); doc != nil {
+		return doc
+	}
+	return docLines(field.Comment)
+}
+
 var tsIdentRe = regexp.MustCompile(`^[A-Za-z_$][A-Za-z0-9_$]*$`)
+
+var (
+	tsStringLitRe = regexp.MustCompile(`^'(?:[^'\\]|\\.)*'$`)
+	tsNumberLitRe = regexp.MustCompile(`^-?[0-9]+(?:\.[0-9]+)?$`)
+)
 
 // formatFieldName returns the field name suitable for emission into both an
 // interface property list and an object literal. JSON names that aren't
@@ -279,6 +356,12 @@ func inferZero(ts string) (string, error) {
 			}
 		}
 	}
+	// Literal types and literal unions ('manual' | 'automatic', 0 | 1):
+	// the first arm is the natural zero.
+	first := strings.TrimSpace(strings.Split(ts, "|")[0])
+	if tsStringLitRe.MatchString(first) || tsNumberLitRe.MatchString(first) {
+		return first, nil
+	}
 	if strings.HasSuffix(ts, "[]") {
 		return "[]", nil
 	}
@@ -294,16 +377,23 @@ func inferZero(ts string) (string, error) {
 }
 
 // checkTypeMapCollisions panics if any user-mapped TS type name matches
-// the name of a struct gents is about to emit. Same invariant as §3.8's
-// strip-induced collision check, extended to cover the -map flag.
+// the name of an interface gents is about to emit. Interface names are
+// the original Go struct names (emitted verbatim, never stripped), so the
+// comparison is against the keys of e.marked — comparing against the
+// stripped factory base names would miss real collisions and flag
+// non-collisions whenever -strip is in play.
 func (e *emitter) checkTypeMapCollisions() {
-	for goType, tsType := range e.typeMap {
-		for origName, generatedTS := range e.marked {
-			if tsType == generatedTS {
-				e.panicAt(e.origin[origName],
-					"mapped TS type %q (from -map %s=%s) collides with the generated interface for %q",
-					tsType, goType, tsType, origName)
-			}
+	keys := make([]string, 0, len(e.typeMap))
+	for k := range e.typeMap {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, goType := range keys {
+		tsType := e.typeMap[goType]
+		if pos, exists := e.origin[tsType]; exists {
+			e.panicAt(pos,
+				"mapped TS type %q (from -map %s=%s) collides with the generated interface for %q",
+				tsType, goType, tsType, tsType)
 		}
 	}
 }
@@ -347,6 +437,47 @@ func (e *emitter) parseJSONTag(field *ast.Field) (wireName string, optional, str
 		}
 	}
 	return parts[0], optional, stringFlag, false, true
+}
+
+// parseTSTag reads the `ts:"..."` struct tag — a per-field override of
+// the emitted TS type expression. Returns the raw value and whether the
+// tag was present.
+func parseTSTag(field *ast.Field) (string, bool) {
+	if field.Tag == nil {
+		return "", false
+	}
+	raw := strings.Trim(field.Tag.Value, "`")
+	return reflect.StructTag(raw).Lookup("ts")
+}
+
+// resolveFieldType computes a field's typeInfo. A ts:"..." tag replaces
+// the Go-derived type entirely (it even works on Go types gents couldn't
+// map on its own — the tag is a per-field escape hatch), with the factory
+// zero inferred from the TS expression. Without the tag, the type comes
+// from mapGoType plus the optional ,string coercion. Combining ts and
+// ,string panics: the override already dictates the final type, so the
+// coercion could only contradict it.
+func (e *emitter) resolveFieldType(field *ast.Field, stringFlag bool) typeInfo {
+	tsOverride, hasTS := parseTSTag(field)
+	if hasTS {
+		if stringFlag {
+			e.panicAt(field.Tag.Pos(), "ts tag and json ,string flag cannot be combined; the ts tag already replaces the emitted type")
+		}
+		tsOverride = strings.TrimSpace(tsOverride)
+		if tsOverride == "" {
+			e.panicAt(field.Tag.Pos(), "empty ts tag; either supply a TS type expression or remove the tag")
+		}
+		zero, err := inferZero(tsOverride)
+		if err != nil {
+			e.panicAt(field.Tag.Pos(), "%s (from ts:%q)", err.Error(), tsOverride)
+		}
+		return typeInfo{ts: tsOverride, zero: zero}
+	}
+	ti := e.mapGoType(field.Type)
+	if stringFlag {
+		ti = e.applyStringFlag(ti, field.Pos())
+	}
+	return ti
 }
 
 // applyStringFlag coerces a field's TS type to reflect encoding/json's
@@ -416,15 +547,12 @@ func (e *emitter) collectFieldsDeep(st *ast.StructType, depth int, pointerEmbedd
 			//                     struct into the outer struct at
 			//                     depth+1.
 			if hasTag && wireName != "" {
-				ti := e.mapGoType(field.Type)
-				if stringFlag {
-					ti = e.applyStringFlag(ti, field.Pos())
-				}
 				*out = append(*out, fieldInfo{
 					jsonName: wireName,
 					tsName:   formatFieldName(wireName),
 					optional: optional,
-					ti:       ti,
+					ti:       e.resolveFieldType(field, stringFlag),
+					doc:      fieldDoc(field),
 					depth:    depth,
 					pos:      field.Pos(),
 					tagged:   true,
@@ -438,10 +566,7 @@ func (e *emitter) collectFieldsDeep(st *ast.StructType, depth int, pointerEmbedd
 			continue
 		}
 
-		ti := e.mapGoType(field.Type)
-		if stringFlag {
-			ti = e.applyStringFlag(ti, field.Pos())
-		}
+		ti := e.resolveFieldType(field, stringFlag)
 		for _, nameIdent := range field.Names {
 			if !nameIdent.IsExported() {
 				continue
@@ -456,6 +581,7 @@ func (e *emitter) collectFieldsDeep(st *ast.StructType, depth int, pointerEmbedd
 				tsName:   formatFieldName(name),
 				optional: optional,
 				ti:       ti,
+				doc:      fieldDoc(field),
 				depth:    depth,
 				pos:      nameIdent.Pos(),
 				tagged:   tagged,
@@ -736,9 +862,13 @@ func (e *emitter) mapMap(t *ast.MapType) typeInfo {
 // ---------------------------------------------------------------------------
 // Emission
 
-func (e *emitter) emit(structs []structInfo) string {
+func (e *emitter) emit(blocks []constBlock, structs []structInfo) string {
 	var sb strings.Builder
 	sb.WriteString("// Code generated by github.com/mmalcek/gents; DO NOT EDIT.\n")
+	for _, b := range blocks {
+		sb.WriteString("\n")
+		e.emitConstBlock(&sb, b)
+	}
 	for _, s := range structs {
 		sb.WriteString("\n")
 		e.emitInterface(&sb, s)
@@ -748,7 +878,48 @@ func (e *emitter) emit(structs []structInfo) string {
 	return sb.String()
 }
 
+// emitJSDoc writes a JSDoc block at the given indent. lines may be
+// empty; src, when non-empty, is appended as a final `(source: file.go)`
+// line. Nothing is written when both are empty. A lone line collapses to
+// the single-line /** ... */ form.
+func emitJSDoc(sb *strings.Builder, indent string, lines []string, src string) {
+	all := make([]string, 0, len(lines)+1)
+	for _, l := range lines {
+		// A literal */ inside a doc comment would terminate the JSDoc
+		// block early; escape it.
+		all = append(all, strings.ReplaceAll(l, "*/", `*\/`))
+	}
+	if src != "" {
+		all = append(all, "(source: "+src+")")
+	}
+	if len(all) == 0 {
+		return
+	}
+	if len(all) == 1 {
+		sb.WriteString(indent + "/** " + all[0] + " */\n")
+		return
+	}
+	sb.WriteString(indent + "/**\n")
+	for _, l := range all {
+		sb.WriteString(indent + " *")
+		if l != "" {
+			sb.WriteString(" " + l)
+		}
+		sb.WriteString("\n")
+	}
+	sb.WriteString(indent + " */\n")
+}
+
+func (e *emitter) emitConstBlock(sb *strings.Builder, b constBlock) {
+	emitJSDoc(sb, "", b.doc, b.src)
+	for _, c := range b.consts {
+		emitJSDoc(sb, "", c.doc, "")
+		sb.WriteString("export const " + c.name + " = " + c.value + "\n")
+	}
+}
+
 func (e *emitter) emitInterface(sb *strings.Builder, s structInfo) {
+	emitJSDoc(sb, "", s.doc, s.src)
 	sb.WriteString("export interface ")
 	sb.WriteString(s.origName)
 	if len(s.fields) == 0 {
@@ -757,6 +928,7 @@ func (e *emitter) emitInterface(sb *strings.Builder, s structInfo) {
 	}
 	sb.WriteString(" {\n")
 	for _, f := range s.fields {
+		emitJSDoc(sb, "  ", f.doc, "")
 		sb.WriteString("  ")
 		sb.WriteString(f.tsName)
 		if f.optional {
@@ -767,6 +939,130 @@ func (e *emitter) emitInterface(sb *strings.Builder, s structInfo) {
 		sb.WriteString("\n")
 	}
 	sb.WriteString("}\n")
+}
+
+// ---------------------------------------------------------------------------
+// Const expression rendering
+
+// tsBinaryOps maps the Go binary operators whose TS spelling and
+// semantics match closely enough to emit. Deliberately absent: / and %
+// (Go const division is exact/integer, JS division is float — silent
+// value drift), and &^ (no TS equivalent). Note that JS bitwise ops
+// operate on 32-bit integers; bit-flag constants are fine, giant shifted
+// masks are not.
+var tsBinaryOps = map[token.Token]string{
+	token.ADD: "+",
+	token.SUB: "-",
+	token.MUL: "*",
+	token.AND: "&",
+	token.OR:  "|",
+	token.XOR: "^",
+	token.SHL: "<<",
+	token.SHR: ">>",
+}
+
+// renderConstExpr renders a Go const value expression as TS source.
+// Supported: int/float/string literals, true/false, references to
+// exported consts declared earlier in the input, unary -/^ (^ becomes
+// ~), parens, and the operators in tsBinaryOps. Everything else panics —
+// including iota, because gents doesn't evaluate constants and TS has no
+// equivalent; the fix is always "write explicit values".
+func (e *emitter) renderConstExpr(expr ast.Expr) string {
+	switch t := expr.(type) {
+	case *ast.BasicLit:
+		switch t.Kind {
+		case token.INT:
+			return renderIntLit(t.Value)
+		case token.FLOAT:
+			return t.Value
+		case token.STRING:
+			s, err := strconv.Unquote(t.Value)
+			if err != nil {
+				e.panicAt(t.Pos(), "cannot parse string literal %s: %v", t.Value, err)
+			}
+			return tsQuote(s)
+		}
+		e.panicAt(t.Pos(), "unsupported const literal %s (rune and imaginary literals are not supported)", t.Value)
+	case *ast.Ident:
+		switch t.Name {
+		case "true", "false":
+			return t.Name
+		case "iota":
+			e.panicAt(t.Pos(), "iota is not supported in exported consts; write explicit values")
+		}
+		if _, ok := e.constNames[t.Name]; ok {
+			return t.Name
+		}
+		e.panicAt(t.Pos(), "const expression references %q, which is not an exported const declared earlier in the input (TS const declarations cannot forward-reference)", t.Name)
+	case *ast.BinaryExpr:
+		op, ok := tsBinaryOps[t.Op]
+		if !ok {
+			e.panicAt(t.OpPos, "unsupported operator %q in exported const expression (division and %%/&^ have different semantics in TS — precompute the value)", t.Op.String())
+		}
+		return e.renderConstOperand(t.X, t.Op) + " " + op + " " + e.renderConstOperand(t.Y, t.Op)
+	case *ast.ParenExpr:
+		return "(" + e.renderConstExpr(t.X) + ")"
+	case *ast.UnaryExpr:
+		switch t.Op {
+		case token.SUB:
+			return "-" + e.renderConstExpr(t.X)
+		case token.XOR:
+			return "~" + e.renderConstExpr(t.X)
+		}
+		e.panicAt(t.Pos(), "unsupported unary operator %q in exported const expression", t.Op.String())
+	}
+	e.panicAt(expr.Pos(), "unsupported const expression %T (supported: literals, earlier exported const references, and +, -, *, &, |, ^, <<, >> expressions)", expr)
+	return ""
+}
+
+// renderConstOperand parenthesizes nested binary sub-expressions unless
+// they repeat the parent operator (left-associative chains like a|b|c|d
+// stay flat). Go and TS precedence tables differ (& binds tighter than +
+// in Go, looser in TS), so explicit parens are the only safe way to
+// preserve Go's grouping.
+func (e *emitter) renderConstOperand(expr ast.Expr, parentOp token.Token) string {
+	if b, ok := expr.(*ast.BinaryExpr); ok && b.Op != parentOp {
+		return "(" + e.renderConstExpr(expr) + ")"
+	}
+	return e.renderConstExpr(expr)
+}
+
+// renderIntLit emits a Go integer literal as valid TS. Almost everything
+// passes through verbatim (hex, binary, 0o octal, _ separators); the one
+// exception is Go's legacy 0-prefixed octal (017), which is a syntax
+// error in TS modules and is re-emitted as decimal.
+func renderIntLit(v string) string {
+	if len(v) > 1 && v[0] == '0' && !strings.ContainsAny(v[1:2], "xXbBoO_") {
+		if n, err := strconv.ParseInt(v, 0, 64); err == nil {
+			return strconv.FormatInt(n, 10)
+		}
+	}
+	return v
+}
+
+// tsQuote renders s as a single-quoted TS string literal — matching the
+// quote style factories already use for string zeros.
+func tsQuote(s string) string {
+	var b strings.Builder
+	b.WriteByte('\'')
+	for _, r := range s {
+		switch r {
+		case '\'':
+			b.WriteString(`\'`)
+		case '\\':
+			b.WriteString(`\\`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('\'')
+	return b.String()
 }
 
 func (e *emitter) emitFactory(sb *strings.Builder, s structInfo) {

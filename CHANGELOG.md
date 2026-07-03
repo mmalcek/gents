@@ -8,6 +8,47 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Const-block export.** `//gents:export` on a `const` declaration
+  emits each spec as `export const Name = value`. Supported values:
+  int/float/string literals, `true`/`false`, references to exported
+  consts declared earlier in the input, unary `-`/`^` (emitted as `~`),
+  and the operators `+ - * & | ^ << >>`. Operator expressions preserve
+  Go's grouping with explicit parens (Go and TS precedence tables
+  differ); associative chains like `A | B | C` stay flat. Legacy `017`
+  octal re-emits as decimal. Not supported (panics with the fix):
+  `iota` (gents renders expressions without evaluating them — write
+  explicit values), forward references (TS `const` cannot
+  forward-reference), and division/`%`/`&^` (semantics differ between
+  Go and TS — precompute the value).
+- **JSDoc passthrough + source provenance.** Go doc comments on marked
+  structs, their fields (doc comment or trailing same-line comment),
+  and const specs are emitted as JSDoc blocks — editor hover docs now
+  come straight from the Go source. Every interface and const block
+  also gets a `(source: file.go)` line naming the declaring file
+  (basename only, so output stays byte-stable under line-number churn).
+  Directive lines (`//gents:export`, `//gents:map`) never leak into
+  the output.
+- **Per-field `ts:"..."` tag override.** Replaces the emitted TS type
+  for one field — e.g. ``EntryType string `json:"entry_type"
+  ts:"'manual' | 'automatic'"` `` narrows a Go string to a literal
+  union. The tag is a full escape hatch: it works even on Go types
+  gents cannot map on its own. Factory zeros are inferred from the TS
+  expression. Combining with `json:",string"` panics (the override
+  already dictates the final type).
+- **`-check` CLI flag.** Regenerates in memory and compares against
+  `-out`: exit 0 when identical, exit 1 with a "re-run gents" message
+  when stale or missing. Writes nothing. Wire it into CI or a test
+  script to catch "edited the struct, forgot to `go generate`".
+- **Near-miss marker guard.** A comment that is exactly the marker with
+  stray whitespace (`// gents:export`, or `// gents:map A=B` with a
+  parseable spec) now panics instead of being silently ignored —
+  previously the marked struct just quietly vanished from the output.
+- **Literal-type zero inference.** `inferZero` now handles TS literal
+  types and literal unions (`'manual' | 'automatic'` → `'manual'`,
+  `0 | 1` → `0`) for `-map`, `//gents:map`, and the `ts` tag alike.
+- **`UPDATE_GOLDEN=1 go test ./...`** rewrites every golden fixture
+  from current emitter output. Review the git diff before trusting it.
+
 - **Embedded struct flattening.** An untagged embedded field (`type Foo
   struct { Base }`) now inlines `Base`'s exported fields onto `Foo`,
   matching `encoding/json.Marshal`'s wire shape. Chains flatten
@@ -88,6 +129,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (e.g. `Date` alone, `Active | Pending`) panic at emit time with a
   suggestion to add `| null`. Collision detection fires if a mapped
   TS name matches a generated interface name.
+
+### Fixed
+
+- **Type-map collision check compared the wrong namespace.** It matched
+  user-mapped TS types against *stripped factory base names* instead of
+  the verbatim interface names actually emitted. Under `-strip` this
+  missed real collisions (`-map X=tFoo` while emitting interface
+  `tFoo`) and false-flagged non-collisions (`-map X=Foo` when only the
+  *function* `newFoo` exists — value space, where a type expression
+  cannot collide). The check now compares against interface names.
 
 ### Changed (breaking, pre-release)
 

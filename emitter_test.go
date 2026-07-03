@@ -56,6 +56,13 @@ var goldenCases = []goldenCase{
 	{"gents_map_directive_bundle", true, gents.Options{}},
 	{"multi_file_bundle", true, gents.Options{}},
 	{"multi_file_nested", true, gents.Options{}},
+	{"const_export", false, gents.Options{}},
+	{"jsdoc_comments", false, gents.Options{}},
+	{"ts_tag_override", false, gents.Options{}},
+	// Regression for the type-map collision check: a mapped TS type that
+	// equals a stripped factory base name (but no interface name) must
+	// not be reported as a collision.
+	{"type_map_factory_base_ok", false, gents.Options{Strip: "t", TypeMap: map[string]string{"MyID": "string"}}},
 }
 
 func runGenerate(c goldenCase) (string, error) {
@@ -71,6 +78,15 @@ func TestGenerateMatchesGolden(t *testing.T) {
 			got, err := runGenerate(c)
 			if err != nil {
 				t.Fatalf("Generate: %v", err)
+			}
+			// UPDATE_GOLDEN=1 go test ./... rewrites every expected.ts
+			// from current output. Review the git diff afterwards — a
+			// regenerated golden is only as correct as the emitter.
+			if os.Getenv("UPDATE_GOLDEN") != "" {
+				if err := os.WriteFile(filepath.Join("testdata", c.dir, "expected.ts"), []byte(got), 0o644); err != nil {
+					t.Fatalf("update golden: %v", err)
+				}
+				return
 			}
 			want, err := os.ReadFile(filepath.Join("testdata", c.dir, "expected.ts"))
 			if err != nil {
@@ -180,6 +196,17 @@ var panicCases = []panicCase{
 	{"panic_embedded_flatten_cycle", false, "embedded-field cycle", gents.Options{}},
 	{"panic_gents_map_conflict", true, "conflicting //gents:map", gents.Options{}},
 	{"panic_gents_map_malformed", false, "malformed //gents:map", gents.Options{}},
+	// typemap collision with a verbatim interface name under stripping —
+	// the case the pre-fix check missed entirely.
+	{"panic_type_map_interface_collision", false, "collides with the generated interface", gents.Options{Strip: "t", TypeMap: map[string]string{"Something": "tUser"}}},
+	{"panic_const_iota", false, "iota is not supported", gents.Options{}},
+	{"panic_const_call_expr", false, "unsupported const expression", gents.Options{}},
+	{"panic_const_division", false, "unsupported operator", gents.Options{}},
+	{"panic_const_forward_ref", false, "cannot forward-reference", gents.Options{}},
+	{"panic_const_collides_interface", false, "collides with the generated interface", gents.Options{}},
+	{"panic_ts_tag_uninferrable", false, "cannot infer factory zero value", gents.Options{}},
+	{"panic_ts_tag_with_string_flag", false, "cannot be combined", gents.Options{}},
+	{"panic_marker_near_miss", false, "must be exactly //gents:export", gents.Options{}},
 }
 
 func TestPanics(t *testing.T) {

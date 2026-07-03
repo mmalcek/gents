@@ -13,8 +13,8 @@ functions. Full reference: [docs/gents_package.md](docs/gents_package.md).
 
 | Path | Purpose |
 |---|---|
-| [gents.go](gents.go) | Public API (`Generate`, `GenerateDir`, `Options`). Thin orchestration over two passes. |
-| [emitter.go](emitter.go) | Internals: type dispatch (`mapIdent`, `mapSelector`, `mapStar`, `mapArray`, `mapMap`), JSON tag parsing, type-map resolution, zero inference, emission. |
+| [gents.go](gents.go) | Public API (`Generate`, `GenerateDir`, `Options`). Thin orchestration over two passes; struct + const collection. |
+| [emitter.go](emitter.go) | Internals: type dispatch (`mapIdent`, `mapSelector`, `mapStar`, `mapArray`, `mapMap`), JSON/`ts` tag parsing, type-map resolution, zero inference, const-expression rendering, JSDoc + emission. |
 | [example_test.go](example_test.go) | pkg.go.dev Example functions for `Generate` and `GenerateDir`. |
 | [emitter_test.go](emitter_test.go) | Golden-file tests + idempotency + panic assertions. |
 | [cmd/gents/main.go](cmd/gents/main.go) | CLI. `main` → `run(args, stderr)` for testability. `-in` accepts file or directory (stat-detected); `-out` is the only strictly required flag. |
@@ -69,11 +69,18 @@ add a version suffix, don't rephrase it.
 1. `testdata/<name>/input.go` — a complete Go file, `package <name>` (no
    spaces/dashes; match the dir name).
 2. `testdata/<name>/expected.ts` — the exact TS output, one trailing
-   newline.
+   newline. Either hand-write it or register the case first and run
+   `UPDATE_GOLDEN=1 go test -run TestGenerateMatchesGolden ./...` to
+   emit it — then **review the git diff**; a regenerated golden is only
+   as correct as the emitter that produced it.
 3. Add an entry to `goldenCases` in [emitter_test.go](emitter_test.go).
 4. Run `go test -run TestGenerateMatchesGolden/<name> ./...` to confirm.
 5. `TestIdempotent` runs the same fixture 10× and compares — no
    additional work needed, it picks up new entries automatically.
+
+`UPDATE_GOLDEN=1` rewrites **every** golden, so keep the working tree
+clean before running it and inspect the full diff after — it will
+happily bake a bug into all fixtures at once.
 
 ## Adding a panic fixture
 

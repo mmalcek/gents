@@ -249,6 +249,79 @@ func TestRun_DirPath(t *testing.T) {
 	}
 }
 
+// TestRun_CheckUpToDate — -check against a freshly generated output
+// exits 0 and stays silent.
+func TestRun_CheckUpToDate(t *testing.T) {
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatalf("abs: %v", err)
+	}
+	input := filepath.Join(repoRoot, "testdata", "simple", "input.go")
+	out := filepath.Join(t.TempDir(), "out.ts")
+
+	var stderr strings.Builder
+	if code := run([]string{"-in", input, "-out", out}, &stderr); code != 0 {
+		t.Fatalf("generate: exit %d; stderr:\n%s", code, stderr.String())
+	}
+	stderr.Reset()
+	if code := run([]string{"-in", input, "-out", out, "-check"}, &stderr); code != 0 {
+		t.Fatalf("check on fresh output: exit %d; stderr:\n%s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("check should be silent when up to date, got:\n%s", stderr.String())
+	}
+}
+
+// TestRun_CheckStale — -check against a modified output exits 1 with a
+// "re-run gents" hint and must NOT rewrite the file.
+func TestRun_CheckStale(t *testing.T) {
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatalf("abs: %v", err)
+	}
+	input := filepath.Join(repoRoot, "testdata", "simple", "input.go")
+	out := filepath.Join(t.TempDir(), "out.ts")
+
+	var stderr strings.Builder
+	if code := run([]string{"-in", input, "-out", out}, &stderr); code != 0 {
+		t.Fatalf("generate: exit %d; stderr:\n%s", code, stderr.String())
+	}
+	stale := []byte(generatedHeader + "\n\n// stale\n")
+	if err := os.WriteFile(out, stale, 0o644); err != nil {
+		t.Fatalf("seed stale: %v", err)
+	}
+	stderr.Reset()
+	if code := run([]string{"-in", input, "-out", out, "-check"}, &stderr); code != 1 {
+		t.Fatalf("check on stale output: expected exit 1, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "out of date") {
+		t.Fatalf("stderr should say the file is out of date, got:\n%s", stderr.String())
+	}
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(got) != string(stale) {
+		t.Fatalf("-check must not modify the output file")
+	}
+}
+
+// TestRun_CheckMissingOutput — -check when the output file doesn't exist
+// yet exits 1 (there is something to generate but nothing on disk).
+func TestRun_CheckMissingOutput(t *testing.T) {
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatalf("abs: %v", err)
+	}
+	input := filepath.Join(repoRoot, "testdata", "simple", "input.go")
+	out := filepath.Join(t.TempDir(), "never-written.ts")
+
+	var stderr strings.Builder
+	if code := run([]string{"-in", input, "-out", out, "-check"}, &stderr); code != 1 {
+		t.Fatalf("expected exit 1 for missing output, got %d", code)
+	}
+}
+
 // TestRun_NonexistentPath — clear error, no stack trace.
 func TestRun_NonexistentPath(t *testing.T) {
 	var stderr strings.Builder

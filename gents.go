@@ -81,6 +81,7 @@ func generate(paths []string, opts Options) (string, error) {
 		fset:           fset,
 		marked:         map[string]string{},
 		origin:         map[string]token.Pos{},
+		constNames:     map[string]token.Pos{},
 		strip:          opts.Strip,
 		directiveMap:   map[string]directiveOriginPos{},
 		namedAliases:   map[string]ast.Expr{},
@@ -97,6 +98,7 @@ func generate(paths []string, opts Options) (string, error) {
 			return "", fmt.Errorf("parse %s: %w", p, err)
 		}
 		files = append(files, f)
+		e.lintMarkers(f)
 		e.collectMarked(f)
 		e.collectAuxInfo(f)
 		e.collectDirectives(f)
@@ -116,15 +118,17 @@ func generate(paths []string, opts Options) (string, error) {
 	e.typeMap = merged
 	e.checkTypeMapCollisions()
 
+	var blocks []constBlock
 	var all []structInfo
 	for _, f := range files {
+		blocks = append(blocks, e.collectConsts(f)...)
 		all = append(all, e.collectStructs(f)...)
 	}
 
-	if len(all) == 0 {
+	if len(all) == 0 && len(blocks) == 0 {
 		return "", nil
 	}
-	return e.emit(all), nil
+	return e.emit(blocks, all), nil
 }
 
 // collectGoFiles walks dirPath recursively and returns all .go file paths,
@@ -227,6 +231,70 @@ func (e *emitter) collectMarked(file *ast.File) {
 	}
 }
 
+// collectConsts gathers //gents:export-marked const declarations. The
+// marker must sit on the const declaration itself; there is no per-spec
+// marking — a const block exports atomically or not at all (its specs
+// often only make sense together, bit flags being the canonical case).
+//
+// Every spec needs an explicit value: gents renders expressions without
+// evaluating them, so implicit iota repetition has nothing to render —
+// and TS const declarations cannot forward-reference, so references must
+// point at consts declared earlier in the scanned input.
+func (e *emitter) collectConsts(file *ast.File) []constBlock {
+	var out []constBlock
+	for _, decl := range file.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		if !ok || gd.Tok != token.CONST || !hasMarker(gd.Doc) {
+			continue
+		}
+		block := constBlock{
+			doc: docLines(gd.Doc),
+			src: filepath.Base(e.fset.Position(gd.Pos()).Filename),
+		}
+		for _, spec := range gd.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			if len(vs.Values) == 0 {
+				e.panicAt(vs.Pos(),
+					"const %q has no explicit value (implicit iota repetition); exported consts require explicit values",
+					vs.Names[0].Name)
+			}
+			doc := docLines(vs.Doc)
+			if doc == nil {
+				doc = docLines(vs.Comment)
+			}
+			for i, nameIdent := range vs.Names {
+				name := nameIdent.Name
+				if name == "_" {
+					continue
+				}
+				if prev, dup := e.constNames[name]; dup {
+					e.panicAt(nameIdent.Pos(),
+						"duplicate exported const %q (previously defined at %s)",
+						name, e.fset.Position(prev))
+				}
+				if structPos, isStruct := e.origin[name]; isStruct {
+					e.panicAt(nameIdent.Pos(),
+						"exported const %q collides with the generated interface %q (defined at %s)",
+						name, name, e.fset.Position(structPos))
+				}
+				e.constNames[name] = nameIdent.Pos()
+				block.consts = append(block.consts, constInfo{
+					name:  name,
+					value: e.renderConstExpr(vs.Values[i]),
+					doc:   doc,
+				})
+			}
+		}
+		if len(block.consts) > 0 {
+			out = append(out, block)
+		}
+	}
+	return out
+}
+
 // collectStructs is pass 2: walk declarations a second time in source order
 // and, for every struct marked during pass 1, collect its field metadata.
 func (e *emitter) collectStructs(file *ast.File) []structInfo {
@@ -247,9 +315,19 @@ func (e *emitter) collectStructs(file *ast.File) []structInfo {
 				continue
 			}
 			st := ts.Type.(*ast.StructType)
+			doc := docLines(ts.Doc)
+			if doc == nil && len(gd.Specs) == 1 {
+				// For an ungrouped `type Foo struct` the doc comment
+				// attaches to the GenDecl, not the TypeSpec. Grouped
+				// decls don't inherit the group doc — it describes the
+				// group, not any one struct.
+				doc = docLines(gd.Doc)
+			}
 			out = append(out, structInfo{
 				origName:    orig,
 				factoryBase: factory,
+				doc:         doc,
+				src:         filepath.Base(e.fset.Position(ts.Pos()).Filename),
 				fields:      e.collectFields(st, orig),
 			})
 		}
