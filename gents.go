@@ -35,8 +35,8 @@ type Options struct {
 	// names or package-qualified *ast.SelectorExpr strings. Values are
 	// TS type expressions (e.g. "string", "Date", "string | null",
 	// "Record<string, number>"). Factory zero values are inferred from
-	// the TS type; types whose zero cannot be inferred panic at emit
-	// time with a message pointing at the offending field.
+	// the TS type; types whose zero cannot be inferred fail at emit
+	// time with an error pointing at the offending field.
 	//
 	// User mappings take precedence over built-ins, so
 	// TypeMap["time.Time"] = "Date" is how you override the default
@@ -48,8 +48,9 @@ type Options struct {
 // struct, and returns the TypeScript source. An empty string with a nil
 // error means the input had no marked structs.
 //
-// Panics on unsupported Go types or malformed input. Callers that need
-// panics converted to errors should recover themselves.
+// Unsupported Go types and malformed input are reported as errors
+// prefixed with the offending file:line. Generate never panics on bad
+// input; a panic escaping this package is a bug in gents.
 func Generate(inPath string, opts Options) (string, error) {
 	return generate([]string{inPath}, opts)
 }
@@ -61,7 +62,7 @@ func Generate(inPath string, opts Options) (string, error) {
 // resolve naturally because all marked structs share one output.
 //
 // Name collisions (two different Go structs that map to the same TS name
-// after stripping) panic with a message identifying both sources.
+// after stripping) are reported as an error identifying both sources.
 func GenerateDir(dirPath string, opts Options) (string, error) {
 	paths, err := collectGoFiles(dirPath)
 	if err != nil {
@@ -75,7 +76,22 @@ func GenerateDir(dirPath string, opts Options) (string, error) {
 // file-then-source order to collect fields. Emission is deterministic
 // because paths arrive sorted and struct/field order within each file is
 // preserved.
-func generate(paths []string, opts Options) (string, error) {
+//
+// This is also the API's panic boundary: the collectors abort on
+// unsupported input via panicAt (a clean non-local exit for recursive
+// descent), and the deferred recover here converts those diagnostics
+// into returned errors. Anything that isn't a diagError is a genuine
+// bug and re-panics with its stack intact.
+func generate(paths []string, opts Options) (out string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			de, ok := r.(diagError)
+			if !ok {
+				panic(r)
+			}
+			out, err = "", de.err
+		}
+	}()
 	fset := token.NewFileSet()
 	e := &emitter{
 		fset:           fset,

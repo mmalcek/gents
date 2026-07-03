@@ -34,28 +34,13 @@ func main() {
 
 // run is the testable entry point. Flag parsing, validation, and the
 // library call all live here so tests can drive it with a synthetic args
-// slice and inspect stderr. Panics from the library are caught and
-// printed as single-line errors — never leaks a Go stack trace to the
-// user through a //go:generate pipeline.
+// slice and inspect stderr. The library reports every diagnostic
+// (unsupported type, malformed tag, collision) as an ordinary error —
+// printed as a single line with exit code 1, so nothing leaks a Go
+// stack trace through a //go:generate pipeline. A panic reaching this
+// function is by definition a bug in gents; Go's default handler prints
+// the full stack for the bug report.
 func run(args []string, stderr io.Writer) (code int) {
-	defer func() {
-		r := recover()
-		if r == nil {
-			return
-		}
-		// Our deliberate panics (emitter.panicAt) always carry an error
-		// value — print the message cleanly and exit 1. Anything else
-		// (nil deref, index out of range, etc.) is an internal bug;
-		// re-panic so Go's default handler prints a full stack trace
-		// for debugging and bug reports.
-		if err, ok := r.(error); ok {
-			fmt.Fprintln(stderr, err)
-			code = 1
-			return
-		}
-		panic(r)
-	}()
-
 	fs := flag.NewFlagSet("gents", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 

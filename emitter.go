@@ -304,11 +304,20 @@ func (e *emitter) collectAuxInfo(file *ast.File) {
 	}
 }
 
-// panicAt aborts with a file:line-prefixed error wrapped in panic — the
-// caller of Generate is expected to recover if they want errors.
+// diagError wraps a deliberate diagnostic raised via panicAt so the
+// recover at the public API boundary (generate) can distinguish it from
+// a genuine bug. Diagnostics become returned errors; anything else
+// re-panics with its stack intact.
+type diagError struct{ err error }
+
+// panicAt aborts the current walk with a file:line-prefixed diagnostic.
+// Internal use of panic keeps the deeply recursive collectors free of
+// threaded error returns (the same pattern encoding/json uses); the
+// public API never lets it escape — generate() recovers and returns it
+// as an ordinary error.
 func (e *emitter) panicAt(pos token.Pos, format string, args ...any) {
 	position := e.fset.Position(pos)
-	panic(fmt.Errorf("%s: %s", position, fmt.Sprintf(format, args...)))
+	panic(diagError{fmt.Errorf("%s: %s", position, fmt.Sprintf(format, args...))})
 }
 
 // ---------------------------------------------------------------------------

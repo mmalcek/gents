@@ -15,8 +15,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and the operators `+ - * & | ^ << >>`. Operator expressions preserve
   Go's grouping with explicit parens (Go and TS precedence tables
   differ); associative chains like `A | B | C` stay flat. Legacy `017`
-  octal re-emits as decimal. Not supported (panics with the fix):
-  `iota` (gents renders expressions without evaluating them — write
+  octal re-emits as decimal. Not supported (rejected with the fix in
+  the error): `iota` (gents renders expressions without evaluating them — write
   explicit values), forward references (TS `const` cannot
   forward-reference), and division/`%`/`&^` (semantics differ between
   Go and TS — precompute the value).
@@ -33,7 +33,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ts:"'manual' | 'automatic'"` `` narrows a Go string to a literal
   union. The tag is a full escape hatch: it works even on Go types
   gents cannot map on its own. Factory zeros are inferred from the TS
-  expression. Combining with `json:",string"` panics (the override
+  expression. Combining with `json:",string"` is rejected (the override
   already dictates the final type).
 - **`-check` CLI flag.** Regenerates in memory and compares against
   `-out`: exit 0 when identical, exit 1 with a "re-run gents" message
@@ -41,7 +41,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   script to catch "edited the struct, forgot to `go generate`".
 - **Near-miss marker guard.** A comment that is exactly the marker with
   stray whitespace (`// gents:export`, or `// gents:map A=B` with a
-  parseable spec) now panics instead of being silently ignored —
+  parseable spec) is now rejected instead of silently ignored —
   previously the marked struct just quietly vanished from the output.
 - **Literal-type zero inference.** `inferZero` now handles TS literal
   types and literal unions (`'manual' | 'automatic'` → `'manual'`,
@@ -56,13 +56,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   field optional. Dominant-field resolution implements
   `encoding/json`'s rules: least-nested wins, and within the minimum
   depth a tagged contribution wins over an untagged one. Genuine
-  ambiguities panic with the source position of each surviving
+  ambiguities fail with the source position of each surviving
   contribution — `encoding/json` would silently drop all of them, but
   silently dropping is the kind of thing gents refuses to do.
-  Cross-package embedding (`gorm.Model`, etc.) still panics: gents
-  doesn't load external packages. Workarounds live in the panic message.
+  Cross-package embedding (`gorm.Model`, etc.) is still rejected: gents
+  doesn't load external packages. Workarounds live in the error message.
 - **MarshalJSON-inheritance guard for embedding.** If any type in the
-  flatten chain declares `MarshalJSON`, gents panics rather than
+  flatten chain declares `MarshalJSON`, gents fails rather than
   emitting a wire-wrong shape — same safety net as the named-alias
   case.
 - **Embedded fields: two tagged patterns work.** `Base `json:"-"``
@@ -77,18 +77,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   values (`'0'`, `'false'`, or `null` for nullable forms). Matches
   `encoding/json` wire behavior, unblocking the common `int64,string`
   pattern for JS-safe IDs. Applied to `string`/`[]byte`/`time.Time`
-  or any non-numeric, non-boolean type, gents panics with a clear
+  or any non-numeric, non-boolean type, gents fails with a clear
   message — matches `encoding/json`'s own rule that those combinations
   are either ill-defined or silently ignored.
 - **`json:",omitzero"` tag modifier supported** (Go 1.24+). Treated
   identically to `omitempty` for TS emission (optional field + factory
   omits it); the difference between the two flags is Go-side only.
-- **CLI panic recovery**: panics from the library (unsupported type,
-  malformed tag, collision) are converted to single-line stderr
-  messages with exit code 1. No more Go stack traces leaking through
-  `//go:generate` pipelines. The CLI still wraps everything in
-  `defer recover()`, so a runtime bug in gents itself would still
-  surface cleanly instead of nuking a build log.
+- **Errors, never panics, at the library boundary.** `Generate` /
+  `GenerateDir` report every diagnostic (unsupported type, malformed
+  tag, collision) as a returned error with a `file:line` prefix — the
+  public API never panics on bad input. Internally the recursive
+  collectors still abort via panic (the `encoding/json` pattern); a
+  deferred recover at the API boundary converts deliberate diagnostics
+  to errors and re-panics everything else, so a genuine bug in gents
+  crashes with its full stack trace. The CLI prints diagnostics as
+  single-line stderr messages with exit code 1 — no Go stack traces
+  leaking through `//go:generate` pipelines.
 - **`-out` parent directories auto-created**. Writing to
   `../client/types/foo.ts` now works on first run; previously it
   failed with "no such file or directory" if the intermediate dirs
@@ -96,10 +100,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **GitHub Actions CI**: `go vet ./...`, `gofmt -l .`, and
   `go test -race ./...` on push to `main` and all PRs.
 - **Cross-file-reference error nudges users toward bundle mode**. The
-  "unsupported named type" panic includes a hint pointing at
+  "unsupported named type" error includes a hint pointing at
   `GenerateDir` / directory-mode `-in`. Single-file users hitting a
   sibling reference no longer have to find the docs themselves.
-- **`//gents:export` on non-struct types panics loudly** (previously
+- **`//gents:export` on non-struct types fails loudly** (previously
   silently skipped). Applies to type aliases (`type Alias = Something`),
   interfaces, named primitives, and generic instantiations. Matches
   principle 7 ("fail loud on the impossible") — users who explicitly
@@ -108,17 +112,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   chains like `type A B; type B string`) no longer require `-map` —
   gents walks the alias to its underlying primitive type. Safety net:
   if the type declares a `MarshalJSON` method in the scanned input,
-  gents panics with a pointer to `-map` rather than guessing wrong,
+  gents fails with a pointer to `-map` rather than guessing wrong,
   since `MarshalJSON` overrides the wire shape. Cycles are detected
-  and panicked on. Cross-package types still need `-map` —
+  and rejected. Cross-package types still need `-map` —
   auto-resolution is in-scanned-input only.
 - **`//gents:map GoType=TSType` source directive.** Co-locate type
   mappings with the code that uses them instead of bloating
   `//go:generate` lines. Directives are global across the bundle:
   declare once, apply everywhere. Precedence: CLI `-map` > directive
   > built-in. Conflicting directives across files (same Go type,
-  different TS type) panic with both source locations. Malformed
-  directives also panic with a clear format hint.
+  different TS type) fail with both source locations. Malformed
+  directives also fail with a clear format hint.
 - **Custom type mappings** via repeatable CLI `-map GoType=TSType` and
   `Options.TypeMap` library field. Unblocks third-party types
   (`uuid.UUID`, `decimal.Decimal`), named primitive aliases
@@ -126,7 +130,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   previously panicked. User mappings take precedence over built-ins,
   so `-map time.Time=Date|null` overrides the default. Factory zeros
   are inferred from the TS type; types whose zero cannot be inferred
-  (e.g. `Date` alone, `Active | Pending`) panic at emit time with a
+  (e.g. `Date` alone, `Active | Pending`) fail at emit time with a
   suggestion to add `| null`. Collision detection fires if a mapped
   TS name matches a generated interface name.
 

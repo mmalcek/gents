@@ -151,6 +151,10 @@ bundle mode. The overwrite guardrail refuses to clobber a file whose first
 line isn't the gents-generated header; pass `-force` if you really mean it.
 Parent directories of `-out` are created automatically.
 
+Every diagnostic — unsupported type, malformed tag, name collision — is an
+ordinary error: `file:line`-prefixed, one line on stderr, exit code 1. The
+library API (`Generate` / `GenerateDir`) never panics on bad input.
+
 ## Bundle mode (cross-file references)
 
 When the path you point at is a directory, gents walks it recursively
@@ -158,7 +162,7 @@ When the path you point at is a directory, gents walks it recursively
 Go-toolchain conventions), parses every `.go` file, and emits one TS file
 covering every marked struct in sorted-path order. Cross-file references
 resolve because everything lands in the same output. Two marked structs
-that strip to the same TS name panic with both source locations.
+that strip to the same TS name fail with both source locations.
 
 ## Named aliases auto-resolve
 
@@ -177,7 +181,7 @@ type User struct {
 ```
 
 Caveat: if your type declares a `MarshalJSON` method, the wire shape
-isn't the underlying type — gents panics with a hint instead of
+isn't the underlying type — gents errors out with a hint instead of
 guessing wrong. Supply `-map` to override.
 
 Cross-package types (`uuid.UUID` and friends) still need `-map`: gents
@@ -213,7 +217,7 @@ package api
 Source directives are **global across the bundle** — declared in one
 file, applied to references in every file. No duplication. CLI `-map`
 still works and overrides directives silently (explicit runtime choice
-wins). Two directives disagreeing about the same Go type panic with
+wins). Two directives disagreeing about the same Go type fail with
 both locations.
 
 User mappings override built-ins — if you'd rather have `time.Time` emit
@@ -225,7 +229,7 @@ string>`.
 
 Factory zeros are inferred from the TS type (`string` → `''`, `X | null`
 → `null`, `X[]` → `[]`, etc.); TS types whose zero can't be inferred
-(e.g. plain `Date`) panic at emit time with a hint to add `| null`.
+(e.g. plain `Date`) fail at emit time with a hint to add `| null`.
 
 ## JSON tag modifiers
 
@@ -239,8 +243,8 @@ gents understands the same set `encoding/json` does:
 | `json:"name,omitzero"` (Go 1.24+) | Same as `omitempty` for TS purposes. |
 | `json:"n,string"` | Coerces numeric/boolean fields to TS `string` (matches JSON-string wire format, used for JS-safe `int64` IDs). |
 
-Unknown flags panic. `,string` on anything other than a numeric or boolean
-base type panics — `encoding/json` itself ignores it there.
+Unknown flags are rejected. `,string` on anything other than a numeric or
+boolean base type is rejected too — `encoding/json` itself ignores it there.
 
 ## Per-field `ts:"..."` override
 
@@ -288,7 +292,7 @@ export const PermAll = PermRead | PermCreate
 Literals, `true`/`false`, references to earlier exported consts, and
 `+ - * & | ^ << >>` expressions are supported; Go grouping is preserved
 with explicit parens where Go/TS precedence differs. `iota`, division,
-and forward references panic with the fix in the message (usually
+and forward references fail with the fix in the message (usually
 "write explicit values"). See
 [docs/gents_package.md §3.14](docs/gents_package.md) for the full rules.
 
@@ -325,9 +329,9 @@ etc.) are automatically quoted in both the interface and the factory.
   embed flattens Base's fields into the outer struct (matches
   `encoding/json`, including the least-nested / tagged-wins
   dominant-field rules; `*Base` makes contributed fields optional).
-  Cross-package embedding (`gorm.Model`) still panics — declare a
+  Cross-package embedding (`gorm.Model`) is still rejected — declare a
   local mirror or use `-map` for a TS placeholder.
-- Unsupported types panic with a `file:line` pointer: fixed-length
+- Unsupported types fail with a `file:line`-prefixed error: fixed-length
   arrays (`[N]T`), double pointers (`**T`), inline anonymous structs,
   interfaces with non-empty method sets, `chan`, `func`. Third-party
   or named-alias types resolve via `-map`.

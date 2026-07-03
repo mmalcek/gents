@@ -121,10 +121,11 @@ func TestSafeWrite_CreatesParentDir(t *testing.T) {
 	}
 }
 
-// TestRun_RecoversFromLibraryPanic — a library panic on the way out of
-// Generate must become a single-line stderr message with exit code 1,
-// not a Go stack trace. This is the production-grade UX guardrail.
-func TestRun_RecoversFromLibraryPanic(t *testing.T) {
+// TestRun_LibraryDiagnosticIsSingleLine — a diagnostic from the library
+// (here: an unsupported channel field) must surface as a single-line
+// stderr message with exit code 1, never as a Go stack trace. The
+// library returns diagnostics as errors; nothing panics on bad input.
+func TestRun_LibraryDiagnosticIsSingleLine(t *testing.T) {
 	// Resolve the repo-root path so we can reference testdata fixtures
 	// from inside cmd/gents where `go test` cwd's us.
 	repoRoot, err := filepath.Abs("../..")

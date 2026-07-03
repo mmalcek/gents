@@ -65,11 +65,19 @@ one wins.
    byte-identical output. Source order preserved, consistent
    indentation, exactly one trailing newline.
 7. **Fail loud on the impossible; match Go on the optional.**
-   Unsupported Go types panic with a `file:line` pointer — the emitter
-   genuinely cannot produce output for them. Where Go's stdlib has a
-   sensible default (e.g. `encoding/json` using the Go field name when
-   no `json:` tag is present), gents adopts the same default rather
-   than inventing a stricter rule.
+   Unsupported Go types fail with a `file:line`-prefixed error — the
+   emitter genuinely cannot produce output for them. Where Go's stdlib
+   has a sensible default (e.g. `encoding/json` using the Go field name
+   when no `json:` tag is present), gents adopts the same default
+   rather than inventing a stricter rule.
+8. **Errors, never panics, at the API boundary.** Internally the
+   collectors abort via panic (a clean non-local exit for recursive
+   descent — the `encoding/json` pattern); `generate()` recovers at the
+   public boundary and returns the diagnostic as an ordinary error. A
+   panic escaping `Generate`/`GenerateDir` is by definition a bug in
+   gents. Throughout this document, "rejects"/"fails" means: the
+   library returns an error, the CLI prints it as one line on stderr
+   and exits 1.
 
 ---
 
@@ -101,13 +109,13 @@ unmarked structs produces an empty output and the CLI writes no file.
 **Near-miss guard:** a comment that was clearly meant to be a directive
 but has stray whitespace — exactly `// gents:export` (spaces around the
 marker word and nothing else), or `// gents:map A=B` with a parseable
-spec — panics instead of being silently ignored. Prose that merely
+spec — is rejected instead of being silently ignored. Prose that merely
 mentions a directive doesn't trip it.
 
 The marker also works on `const` declarations — see §3.14.
 
 **Marker on a non-struct type (type alias, interface, named primitive,
-generic instantiation) panics** with a clear message. Silent-skip on
+generic instantiation) is rejected** with a clear error. Silent-skip on
 an explicit marker would violate principle 7 ("fail loud") — the user
 asked for emission; if gents can't emit, it says so with `file:line`.
 Workaround: drop the marker, or emit a wrapping struct.
@@ -139,8 +147,8 @@ For **embedded (anonymous) fields**:
   but marks every contributed field optional, mirroring the "nil
   pointer omits the embedded fields" behavior. Dominant-field rules
   apply on collision: least-nested wins; within the minimum depth,
-  tagged wins over untagged; anything else panics as ambiguous with
-  the source location of each surviving contribution. See §7.1 for
+  tagged wins over untagged; anything else is rejected as ambiguous
+  with the source location of each surviving contribution. See §7.1 for
   what the v0.2 implementation can and cannot resolve.
 - **No `json` tag on an exported field** → field emitted using the Go
   field name verbatim, matching `encoding/json`'s own default.
@@ -173,14 +181,14 @@ The full mapping, reflecting `encoding/json.Marshal` wire behavior:
 | Sibling struct marked with `//gents:export` | verbatim interface name (Go struct name) | `new<StrippedName>()` (see §3.5) |
 | Any Go type registered via `-map` / `Options.TypeMap` (§3.9) | as mapped | inferred from the TS expression |
 
-Unsupported types panic with a `file:line` pointer and an actionable
+Unsupported types fail with a `file:line` pointer and an actionable
 message:
 
 - Embedded (anonymous) fields with no `json:` tag → **flattened**
   (v0.2+). Target struct must live in the scanned input; cross-package
-  embedding panics with a pointer at the `-map` / `//gents:map`
+  embedding fails with a pointer at the `-map` / `//gents:map`
   workaround. Ambiguous field contributions (two equally-qualified
-  entries at the same depth) panic with both locations. See §7.1.
+  entries at the same depth) fail with both locations. See §7.1.
 - `[N]T` fixed-length Go arrays → use a slice.
 - `**T` double pointer → use a single pointer with `omitempty`.
 - Inline anonymous `struct{...}` as a field type.
@@ -202,7 +210,7 @@ Full list of modifiers gents recognizes inside the `json:"..."` tag
 | `omitzero` (Go 1.24+) | Identical to `omitempty` for TS emission. The Go-side difference (uses `reflect.IsZero` / a user-defined `IsZero()` method, which handles `time.Time` correctly) doesn't change the wire contract or the TS shape. |
 | `string` | Coerces the field's TS type to reflect `encoding/json`'s `,string` wire wrapping. See below. |
 
-Any other flag → panic with `file:line`.
+Any other flag → error with `file:line`.
 
 #### The `,string` tag modifier
 
@@ -216,8 +224,8 @@ match:
 | `boolean` | `string` | `'false'` |
 | `number \| null` (pointer to numeric) | `string \| null` | `null` |
 | `boolean \| null` (pointer to bool) | `string \| null` | `null` |
-| `string` / `string \| null` (string, `*string`, `[]byte`, `time.Time`, etc.) | **panic** — base is already string; flag would double-encode | — |
-| Anything else (slice, map, struct, interface, `json.RawMessage`) | **panic** — `encoding/json` itself silently ignores `,string` on these types; gents rejects loud | — |
+| `string` / `string \| null` (string, `*string`, `[]byte`, `time.Time`, etc.) | **error** — base is already string; flag would double-encode | — |
+| Anything else (slice, map, struct, interface, `json.RawMessage`) | **error** — `encoding/json` itself silently ignores `,string` on these types; gents rejects loud | — |
 
 Example:
 
@@ -270,9 +278,9 @@ should look like in JS regardless of the Go struct's prefix). The
 library callers stay explicit; the CLI handles the convention default.
 
 Collision rules:
-- Two marked structs sharing a Go name → panic (interface collision).
+- Two marked structs sharing a Go name → error (interface collision).
 - Two marked structs that strip to the same factory base (e.g. `tFoo`
-  and `Foo` with `-strip=t`) → panic (factory name collision).
+  and `Foo` with `-strip=t`) → error (factory name collision).
 
 ### 3.6 Non-identifier JSON names
 
@@ -330,7 +338,7 @@ applied to the factory call only, never to the type name. Source
 declaration order doesn't matter — a two-pass walk collects marked
 names first, then emits fields.
 
-A reference to an **unmarked** struct panics with `file:line`. Silently
+A reference to an **unmarked** struct fails with `file:line`. Silently
 emitting `any` would hide a missing marker.
 
 In bundle mode (§3.8), cross-file references resolve the same way,
@@ -365,9 +373,9 @@ naturally.
 Collisions are detected at Pass 1:
 
 - Two marked structs sharing the same Go name (possibly in different
-  files / packages): **panic** with both source locations.
+  files / packages): **error** with both source locations.
 - Two marked structs mapping to the same TS name after stripping:
-  **panic** with both source locations.
+  **error** with both source locations.
 
 ### 3.9 In-file named-alias auto-resolution
 
@@ -396,9 +404,9 @@ How it works:
    the RHS expression — yielding the primitive type (or nested alias)
    at the end of the chain.
 4. If the type DOES declare a `MarshalJSON` method, auto-resolution
-   would miss the custom wire shape. gents panics with a hint to use
+   would miss the custom wire shape. gents fails with a hint to use
    `-map` (or `Options.TypeMap`) to declare the real wire type.
-5. Cycle detection: `type A B; type B A` panics instead of looping.
+5. Cycle detection: `type A B; type B A` errors out instead of looping.
 
 Chain resolution works: `type A B; type B C; type C string` resolves
 `A` to `string`.
@@ -433,7 +441,7 @@ mechanisms:
 
 Precedence: CLI flag > source directive > built-in defaults. CLI
 overrides silently (explicit runtime choice wins). Two directives that
-disagree about the same Go type in the same bundle → panic with both
+disagree about the same Go type in the same bundle → error with both
 locations.
 
 (In-file named aliases without custom marshaling are handled
@@ -459,7 +467,7 @@ Factory zeros are inferred from the TS type:
 | literal type or literal union (`'manual' \| 'automatic'`, `0 \| 1`) | first arm (`'manual'`, `0`) |
 | `X[]` | `[]` |
 | `Record<...>` | `{}` |
-| anything else (named types like `Date`, arbitrary non-literal unions like `Active \| Pending`) | **panic** at emit time — add `\| null` to the mapping to make it nullable, or use library `Options.TypeMap` with a pre-computed value |
+| anything else (named types like `Date`, arbitrary non-literal unions like `Active \| Pending`) | **error** at emit time — add `\| null` to the mapping to make it nullable, or use library `Options.TypeMap` with a pre-computed value |
 
 Pointer/slice/map wrapping applies by recursion: with `-map
 uuid.UUID=string` in place, `*uuid.UUID` → `string | null`,
@@ -468,7 +476,7 @@ string>`. No extra configuration needed.
 
 **Collision with generated interfaces:** if a mapped TS name matches a
 generated interface name (e.g. `-map Something=User` combined with
-`//gents:export type User struct{}`), gents panics at Pass 1 with both
+`//gents:export type User struct{}`), gents fails at Pass 1 with both
 source locations. The comparison is against the *verbatim interface
 names* (the original Go struct names) — factory function names live in
 value space and cannot collide with a type expression, so `-map X=Foo`
@@ -578,7 +586,7 @@ type Session struct {
 
 - The tag value is emitted **verbatim** as the field's TS type; the
   factory zero is inferred with the same rules as §3.10 (literal
-  unions zero to their first arm). An uninferrable zero panics with
+  unions zero to their first arm). An uninferrable zero fails with
   the usual `| null` hint.
 - It is a **full escape hatch**: the Go field type is not consulted at
   all, so the tag even works on types gents cannot map on its own.
@@ -588,7 +596,7 @@ type Session struct {
   `//gents:map` (§3.10); the `ts` tag exists for the case where one
   field of a common Go type (usually `string`) has a narrower wire
   contract than the type suggests.
-- Combining with `json:",string"` panics — the override already
+- Combining with `json:",string"` is rejected — the override already
   dictates the final type, the coercion could only contradict it.
 - `json:"-"` still wins: a skipped field is skipped, tag or no tag.
 
@@ -640,7 +648,8 @@ Rules:
   TS precedence tables differ (`&` binds tighter than `+` in Go,
   looser in TS), so nested sub-expressions are parenthesized — except
   same-operator associative chains (`A | B | C`), which stay flat.
-- **Panics** (all with `file:line` and the fix in the message):
+- **Rejected with an error** (all with `file:line` and the fix in the
+  message):
   - `iota`, explicit or implicit — gents renders expressions without
     evaluating them, and TS has no equivalent. Write explicit values.
   - Forward references — TS `const` declarations cannot
@@ -726,16 +735,17 @@ The CLI calls `os.MkdirAll` on the parent directory of `-out` before
 writing. First-time use of `gents -in item.go -out ../client/types/item.ts`
 works even when `types/` doesn't exist yet.
 
-### Panic handling
+### Error reporting
 
-Library-level panics (unsupported types, collisions, malformed tags)
-are caught by the CLI's top-level `defer recover()` and printed as
-single-line error messages with exit code 1. No stack trace in this
-common path.
+Every diagnostic (unsupported type, collision, malformed tag) is an
+ordinary error returned by the library — `file:line`-prefixed — and the
+CLI prints it as a single line on stderr with exit code 1. No stack
+trace in this common path, and nothing for a `//go:generate` pipeline
+to mangle.
 
-Runtime panics (nil deref, index out of range — i.e. bugs in gents
-itself) are **re-panicked** so the user sees a full stack trace for
-bug reports.
+A runtime panic (nil deref, index out of range — i.e. a bug in gents
+itself) is deliberately **not** caught anywhere: Go's default handler
+prints the full stack trace for the bug report.
 
 ---
 
@@ -762,9 +772,9 @@ type Options struct {
 // source for every //gents:export-marked struct. An empty string with
 // a nil error means the input had no marked structs.
 //
-// Panics on unsupported Go types or malformed input. The panic payload
-// is always an error; callers that need panics converted to errors
-// should use defer+recover and type-assert.
+// Unsupported Go types and malformed input are reported as errors
+// prefixed with the offending file:line. Generate never panics on bad
+// input; a panic escaping this package is a bug in gents.
 func Generate(inPath string, opts Options) (string, error)
 
 // GenerateDir is the bundle-mode entry point. Walks dirPath recursively,
@@ -967,8 +977,8 @@ factory zero — e.g. an `Inner` field referencing a marked struct
 
 ### 7.1 Current limitations
 
-These panic today. Some may relax in future versions; none are design
-mistakes.
+These are rejected with an error today. Some may relax in future
+versions; none are design mistakes.
 
 - **Cross-package embedded flattening.** Default flattening works for
   embedded types declared inside the scanned input (single file or
@@ -981,7 +991,7 @@ mistakes.
   the type via `-map` / `//gents:map` for a TS placeholder. Also
   unsupported at any depth: embedding a type with a custom
   `MarshalJSON` method (the wire shape comes from the method, not
-  field walking — gents panics with a pointer to the workaround) and
+  field walking — gents fails with a pointer to the workaround) and
   generic-instantiation embedding (`Box[T]`).
 - **Fixed-length Go arrays (`[N]T`).** `encoding/json` marshals these as
   JSON arrays, inconsistently with the `[]byte` base64 special case.
@@ -995,8 +1005,8 @@ mistakes.
   strings (or text-marshaler-implementing). gents only supports literal
   `string`.
 - **`,string` flag on non-numeric, non-boolean types.** `encoding/json`
-  itself ignores it on slices, maps, structs, etc. gents panics loudly
-  rather than producing wrong output.
+  itself ignores it on slices, maps, structs, etc. gents rejects it
+  loudly rather than producing wrong output.
 
 ### 7.2 Explicit non-goals
 

@@ -157,15 +157,18 @@ type tFoo struct {
 	}
 }
 
-// Panic tests — cover both single-file and bundle-mode panic fixtures.
-type panicCase struct {
+// Diagnostic-error tests — cover both single-file and bundle-mode
+// fixtures for input gents must reject. The fixture directories keep
+// their historical panic_ prefix; since the library's panic boundary
+// landed, diagnostics surface as returned errors, never as panics.
+type errorCase struct {
 	dir      string
 	isDir    bool
 	contains string
 	opts     gents.Options
 }
 
-var panicCases = []panicCase{
+var errorCases = []errorCase{
 	{"panic_chan", false, "channel", gents.Options{}},
 	{"panic_map_nonstring_key", false, "string-keyed", gents.Options{}},
 	{"panic_array", false, "fixed-length", gents.Options{}},
@@ -209,30 +212,28 @@ var panicCases = []panicCase{
 	{"panic_marker_near_miss", false, "must be exactly //gents:export", gents.Options{}},
 }
 
-func TestPanics(t *testing.T) {
-	for _, c := range panicCases {
+func TestDiagnosticErrors(t *testing.T) {
+	for _, c := range errorCases {
 		t.Run(c.dir, func(t *testing.T) {
-			defer func() {
-				r := recover()
-				if r == nil {
-					t.Fatalf("expected panic, got none")
-				}
-				err, ok := r.(error)
-				if !ok {
-					t.Fatalf("panic payload is %T, want error; payload=%v", r, r)
-				}
-				msg := err.Error()
-				if !strings.Contains(msg, c.contains) {
-					t.Fatalf("panic message %q does not contain %q", msg, c.contains)
-				}
-				if !strings.Contains(msg, ".go:") {
-					t.Fatalf("panic message %q missing file:line pointer", msg)
-				}
-			}()
+			var out string
+			var err error
 			if c.isDir {
-				_, _ = gents.GenerateDir(filepath.Join("testdata", c.dir, "input"), c.opts)
+				out, err = gents.GenerateDir(filepath.Join("testdata", c.dir, "input"), c.opts)
 			} else {
-				_, _ = gents.Generate(filepath.Join("testdata", c.dir, "input.go"), c.opts)
+				out, err = gents.Generate(filepath.Join("testdata", c.dir, "input.go"), c.opts)
+			}
+			if err == nil {
+				t.Fatalf("expected error, got none (output:\n%s)", out)
+			}
+			if out != "" {
+				t.Fatalf("output must be empty on error, got:\n%s", out)
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, c.contains) {
+				t.Fatalf("error %q does not contain %q", msg, c.contains)
+			}
+			if !strings.Contains(msg, ".go:") {
+				t.Fatalf("error %q missing file:line pointer", msg)
 			}
 		})
 	}
